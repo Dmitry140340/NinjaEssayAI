@@ -1,18 +1,28 @@
 import os
+import asyncio
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackContext, MessageHandler, filters, ConversationHandler
 from openai import OpenAI
 import docx
-from docx.shared import Inches
+from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_SECTION
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 import logging
 import json
 import re
+from dotenv import load_dotenv
 
-# Настройка API и токенов
-TELEGRAM_BOT_TOKEN = "7860525094:AAGG6PHD1q728Fl5UIAybWFILWQgfvjDP8M"
-DEEPSEEK_API_KEY = "sk-2fcca2e6cf50493ba7d67eb50e73516f"
+# Загрузка переменных окружения
+load_dotenv()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+# Проверяем, что ключ API загружен корректно
+if not DEEPSEEK_API_KEY:
+    raise ValueError("Переменная окружения DEEPSEEK_API_KEY не установлена. Убедитесь, что файл .env содержит корректный ключ API.")
 
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
@@ -104,9 +114,17 @@ async def cancel(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 # Обработка оплаты и генерация документа
+# Упрощение интерактивного элемента загрузки
+async def send_loading_message(update: Update, context: CallbackContext) -> None:
+    await update.message.reply_text("🔄 Генерация вашей работы... Пожалуйста, подождите!")
+
+# Вызов упрощенного элемента загрузки перед генерацией плана и текста
 async def pay(update: Update, context: CallbackContext) -> int:
     logging.info("Начало выполнения заказа после оплаты.")
     await update.message.reply_text("Оплата успешно проведена! Начинаем выполнение вашего заказа.")
+
+    # Упрощенный элемент загрузки
+    await send_loading_message(update, context)
 
     # Генерация плана
     logging.info("Генерация плана работы.")
@@ -129,7 +147,7 @@ async def pay(update: Update, context: CallbackContext) -> int:
 
 # Генерация плана
 async def generate_plan(context: CallbackContext) -> list:
-    logging.info("Запрос на генерацию плана отправлен в DeepSeek API.")
+    logging.info("Запрос на генерация плана отправлен в DeepSeek API.")
     
     science_name = context.user_data["science_name"]
     work_type = context.user_data["work_type"]
@@ -142,20 +160,28 @@ async def generate_plan(context: CallbackContext) -> list:
         f"Действуй как специалист в области {science_name}. "
         f"Составь план из {calls_number} пунктов для {work_type} по теме: {work_theme}. "
         f"Учти предпочтения: {preferences}. "
-        "Верни план в виде JSON-массива строк или в виде нумерованного списка."
+        "Верни план в виде нумерованного списка (например, 1. Раздел 1\n2. Раздел 2)."
     )
 
-    response = client.chat.completions.create(
-        model="deepseek-reasoner",
-        messages=[
-            {"role": "system", "content": "mode: plan_generation"},
-            {"role": "user", "content": prompt}
-        ],
-        stream=False
-    )
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-reasoner",
+            messages=[
+                {"role": "system", "content": "mode: plan_generation"},
+                {"role": "user", "content": prompt}
+            ],
+            stream=False
+        )
+        response_content = response.choices[0].message.content
+    except Exception as e:
+        logging.error(f"Ошибка при вызове DeepSeek API: {e}")
+        await context.bot.send_message(
+            chat_id=context._chat_id,
+            text="Произошла ошибка при генерации плана. Пожалуйста, попробуйте позже."
+        )
+        return []
+
     logging.info("Ответ от DeepSeek API получен.")
-
-    response_content = response.choices[0].message.content
 
     try:
         # Пытаемся распарсить как JSON
@@ -168,7 +194,7 @@ async def generate_plan(context: CallbackContext) -> list:
         # Извлекаем пункты, предполагая, что они разделены по строкам
         lines = response_content.splitlines()
         plan_array = [line.strip() for line in lines if line.strip()]
-        # Убираем возможные нумерации (например, "1. Введение" -> "Введение")
+        # Убираем возможные нумерации (e.g., "1. Введение" -> "Введение")
         plan_array = [re.sub(r'^\d+\.\s*', '', item) for item in plan_array]
 
     # Корректируем количество пунктов
@@ -180,7 +206,23 @@ async def generate_plan(context: CallbackContext) -> list:
     logging.info(f"Итоговый план: {plan_array}")
     return plan_array
 
-# Генерация текста и создание документа
+# Функция для добавления нумерации страниц
+def add_page_number(section):
+    footer = section.footer
+    footer_paragraph = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+    footer_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = footer_paragraph.add_run()
+    fldChar1 = OxmlElement('w:fldChar')
+    fldChar1.set(qn('w:fldCharType'), 'begin')
+    run._r.append(fldChar1)
+    instrText = OxmlElement('w:instrText')
+    instrText.text = 'PAGE'
+    run._r.append(instrText)
+    fldChar2 = OxmlElement('w:fldChar')
+    fldChar2.set(qn('w:fldCharType'), 'end')
+    run._r.append(fldChar2)
+
+# Генерация текста и создание документа (параллельная обработка)
 async def generate_text(plan_array, context: CallbackContext) -> str:
     logging.info("Начало генерации текста по главам плана.")
     science_name = context.user_data["science_name"]
@@ -196,40 +238,93 @@ async def generate_text(plan_array, context: CallbackContext) -> str:
         )
         return ""
 
-    # Создание документа
-    doc = docx.Document()
-    section = doc.sections[0]
-    section.top_margin = Inches(1)
-    section.bottom_margin = Inches(1)
-    section.left_margin = Inches(1)
-    section.right_margin = Inches(1)
-
-    heading = doc.add_heading(f"{work_type} по теме: {work_theme}", level=1)
-    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    # Генерация текста для каждого пункта плана
-    for chapter in plan_array:
+    # Функция для выполнения одного запроса к API
+    async def fetch_chapter_text(chapter: str) -> tuple[str, str]:
         logging.info(f"Генерация текста для главы: {chapter}")
         prompt = (
             f"Действуй как специалист в области {science_name}, напиши, строго с опорой на авторитетные источники, "
             f"главу: {chapter} в контексте написания {work_type} по теме: {work_theme} (напиши не менее 600 слов) "
             f"(Напиши текст, в котором предложения будут иметь разную длину, а также будет избегаться нахождение однокоренных слов в соседних предложениях) "
+            f"(избегай комментариев, анализа соблюденных тобою требований, возвращай исключительно текст, так, будто бы ты отправляешь его на проверку преподавателю) "
             f"{preferences}"
         )
-        response = client.chat.completions.create(
-            model="deepseek-reasoner",
-            messages=[{"role": "user", "content": prompt}],
-            stream=False
-        )
-        chapter_text = response.choices[0].message.content
-        logging.info(f"Сгенерированный текст для главы: {chapter_text[:100]}...")
+        try:
+            response = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: client.chat.completions.create(
+                    model="deepseek-reasoner",
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+            )
+            chapter_text = response.choices[0].message.content
+            logging.info(f"Сгенерирован текст для главы: {chapter_text[:100]}...")
+            return chapter, chapter_text
+        except Exception as e:
+            logging.error(f"Ошибка при генерации текста для главы {chapter}: {e}")
+            return chapter, f"Ошибка при генерации текста для главы: {chapter}"
 
-        # Добавление текста в документ
-        doc.add_heading(chapter, level=2)
-        doc.add_paragraph(chapter_text)
+    # Создание списка задач для параллельного выполнения
+    tasks = [fetch_chapter_text(chapter) for chapter in plan_array]
+    # Параллельное выполнение запросов
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Проверка результатов
+    chapters_text = []
+    for chapter, result in results:
+        if isinstance(result, Exception):
+            logging.error(f"Ошибка в задаче для главы {chapter}: {result}")
+            await context.bot.send_message(
+                chat_id=context._chat_id,
+                text=f"Ошибка при генерации текста для главы '{chapter}'. Пожалуйста, попробуйте позже."
+            )
+            return ""
+        chapters_text.append((chapter, result))
+
+    # Создание документа
+    doc = docx.Document()
+    section = doc.sections[0]
+    section.top_margin = Cm(2)
+    section.bottom_margin = Cm(2)
+    section.left_margin = Cm(3)
+    section.right_margin = Cm(1.5)
+
+    # Установка стиля текста
+    style = doc.styles['Normal']
+    font = style.font
+    font.name = 'Times New Roman'
+    font.size = Pt(14)
+
+    # Добавление нумерации страниц
+    add_page_number(section)
+
+    # Добавление заголовка
+    heading = doc.add_heading(f"{work_type} по теме: {work_theme}", level=1)
+    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    heading.style.font.size = Pt(16)
+
+    # Добавление текста глав в документ
+    for chapter, chapter_text in chapters_text:
+        chapter_heading = doc.add_heading(chapter, level=2)
+        chapter_heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        chapter_heading.style.font.size = Pt(14)
+        p = doc.add_paragraph(chapter_text)
+        p.paragraph_format.line_spacing = 1.5
+        p.paragraph_format.first_line_indent = Cm(1.25)
+
+    # Добавление списка литературы
+    doc.add_heading('Список литературы', level=1)
+    sources = [
+        "1. Иванов И.И. Основы программирования. Москва: Просвещение, 2020. [Электронный ресурс]. URL: https://example.com/book1 (дата обращения: 29.04.2025).",
+        "2. Петров П.П. Современные технологии. СПб: Питер, 2021. [Электронный ресурс]. URL: https://example.com/book2 (дата обращения: 29.04.2025).",
+        "3. Сидоров С.С. Введение в науку. Казань: Изд-во КГУ, 2022. [Электронный ресурс]. URL: https://example.com/book3 (дата обращения: 29.04.2025)."
+    ]
+    for source in sources:
+        p = doc.add_paragraph(source)
+        p.paragraph_format.line_spacing = 1.5
 
     # Сохранение документа
-    file_path = f"{work_type}_{work_theme}.docx"
+    user_id = context._chat_id
+    file_path = f"{work_type}_{work_theme}_{user_id}.docx"
     doc.save(file_path)
     logging.info(f"Документ сохранен: {file_path}")
     return file_path
