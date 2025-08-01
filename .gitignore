@@ -1,0 +1,43 @@
+# Файлы конфигурации
+.env
+*.env
+
+# Сгенерированные файлы
+generated/
+*.docx
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Логи
+*.log
+logs/
+
+# База данных
+*.db
+*.sqlite
+
+# Тестовые файлы
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
