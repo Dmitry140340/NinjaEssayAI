@@ -3,7 +3,13 @@ import asyncio
 import io
 import sqlite3
 import time
+import csv
+import sys
 from collections import defaultdict
+try:
+    import psutil
+except ImportError:
+    psutil = None
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackContext, MessageHandler, filters, ConversationHandler, CallbackQueryHandler
 from openai import AsyncOpenAI
@@ -32,6 +38,9 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 # Значения по умолчанию для YooKassa удалены для безопасности
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
+
+# 🧪 ТЕСТОВЫЙ РЕЖИМ - установите в True для тестирования без реальных платежей
+TESTING_MODE = True
 
 # Администраторы бота
 ADMIN_IDS = [659874549]  # Ваш Telegram ID как администратор
@@ -84,6 +93,8 @@ def validate_user_input(text: str, max_length: int = 1000) -> str:
         raise ValueError(f"Слишком длинный текст (максимум {max_length} символов)")
     # Убираем потенциально опасные теги и экранируем HTML
     cleaned_text = html.escape(text.strip())
+    if not cleaned_text:  # Проверяем после strip()
+        raise ValueError("Пустой ввод не допускается")
     return cleaned_text
 
 def validate_contact(contact: str) -> str:
@@ -91,7 +102,8 @@ def validate_contact(contact: str) -> str:
     contact = validate_user_input(contact, 100)
     # Дополнительная валидация для email/телефона
     pattern_email = re.compile(r"^[\w\.-]+@[\w\.-]+\.\w+$")
-    pattern_phone = re.compile(r"^\+?\d{10,15}$")
+    # Паттерн для телефона: цифры, пробелы, тире, плюс в начале
+    pattern_phone = re.compile(r"^\+?[0-9\s\-\(\)]{10,20}$")
     if not (pattern_email.match(contact) or pattern_phone.match(contact)):
         raise ValueError("Неверный формат контакта")
     return contact
@@ -972,12 +984,21 @@ async def start(update: Update, context: CallbackContext) -> None:
     # Show user agreement before displaying menu
     keyboard = [["Продолжить"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    
+    # Уведомление о тестовом режиме
+    mode_text = ""
+    if TESTING_MODE:
+        mode_text = "\n🧪 *ВНИМАНИЕ: БОТ В ТЕСТОВОМ РЕЖИМЕ* 🧪\n" \
+                   "Все заказы выполняются БЕСПЛАТНО для тестирования!\n\n"
+    
     await update.message.reply_text(
         "👾 Добро пожаловать в *NinjaEssayAI*! 🥷\n\n"
+        f"{mode_text}"
         "Перед началом работы, пожалуйста, ознакомьтесь с пользовательским соглашением:\n"
         "https://docs.google.com/document/d/100ljVD3fFveH3Vuz7Y6F9QfFj5EsdOBymdRDRAMe2MI/edit?tab=t.0\n\n"
         "Нажимая на кнопку \"Продолжить\", вы подтверждаете, что ознакомились с пользовательским соглашением.",
-        reply_markup=reply_markup
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
     )
 
 # Команда /help
@@ -1017,10 +1038,129 @@ async def continue_handler(update: Update, context: CallbackContext) -> None:
     )
 
 # Состояния разговора
-WORK_TYPE, SCIENCE_NAME, PAGE_NUMBER, WORK_THEME, PREFERENCES, CUSTOMER_CONTACT, PAYMENT = range(7)
+WORK_TYPE, SCIENCE_NAME, PAGE_NUMBER, WORK_THEME, CUSTOM_PLAN, PREFERENCES, PAYMENT = range(7)
+
+# Функция для создания клавиатуры с кнопкой "Назад"
+def create_keyboard_with_back(options, show_back=True):
+    """Создает клавиатуру с опциональной кнопкой 'Назад'"""
+    keyboard = []
+    
+    # Добавляем основные опции только если они есть
+    if options:  # Проверяем, что список не пустой
+        if isinstance(options[0], list):
+            keyboard.extend(options)
+        else:
+            # Если это простой список строк, группируем по 2
+            for i in range(0, len(options), 2):
+                row = options[i:i+2]
+                keyboard.append(row)
+    
+    # Добавляем кнопку "Назад" если нужно
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    
+    return keyboard
+
+# Функция для возврата на предыдущий шаг
+async def go_back_handler(update: Update, context: CallbackContext) -> int:
+    """Обработчик возврата на предыдущий шаг"""
+    current_step = context.user_data.get("current_step", WORK_TYPE)
+    
+    if current_step == WORK_TYPE:
+        await update.message.reply_text("Вы уже на первом шаге. Используйте /cancel для отмены заказа.")
+        return await order(update, context)
+    elif current_step == SCIENCE_NAME:
+        return await order(update, context)
+    elif current_step == PAGE_NUMBER:
+        return await science_name_back(update, context)
+    elif current_step == WORK_THEME:
+        return await page_number_back(update, context)
+    elif current_step == CUSTOM_PLAN:
+        return await work_theme_back(update, context)
+    elif current_step == PREFERENCES:
+        # Всегда возвращаемся на предыдущий шаг (CUSTOM_PLAN), независимо от типа плана
+        return await custom_plan_back(update, context)
+    elif current_step == PAYMENT:
+        return await preferences_back(update, context)
+    
+    return WORK_TYPE
+
+# Функции для возврата на конкретные шаги
+async def science_name_back(update: Update, context: CallbackContext) -> int:
+    """Возврат к выбору типа работы"""
+    keyboard = create_keyboard_with_back([
+        ["📝 Эссе - 300₽", "📜 Доклад - 300₽"],
+        ["📖 Реферат - 400₽", "💼 Проект - 400₽"],
+        ["📚 Курсовая работа - 500₽"],
+        ["🎓 Дипломная работа - 800₽"]
+    ], show_back=False)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text("🥷 *Выберите тип работы:* 🥷", reply_markup=reply_markup)
+    context.user_data["current_step"] = WORK_TYPE
+    return WORK_TYPE
+
+async def page_number_back(update: Update, context: CallbackContext) -> int:
+    """Возврат к вводу дисциплины"""
+    keyboard = create_keyboard_with_back([], show_back=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(
+        "📝 Шаг 1/6: Укажите название дисциплины (например, Математика):",
+        reply_markup=reply_markup
+    )
+    context.user_data["current_step"] = SCIENCE_NAME
+    return SCIENCE_NAME
+
+async def work_theme_back(update: Update, context: CallbackContext) -> int:
+    """Возврат к вводу количества страниц"""
+    work_type = context.user_data.get("work_type", "")
+    clean_type = re.sub(r"[^А-Яа-яЁё ]", "", work_type).strip()
+    max_pages = PAGE_LIMITS.get(clean_type, 10)
+    
+    keyboard = create_keyboard_with_back([], show_back=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(
+        f"📝 Шаг 2/6: Введите количество страниц (максимум {max_pages}):",
+        reply_markup=reply_markup
+    )
+    context.user_data["current_step"] = PAGE_NUMBER
+    return PAGE_NUMBER
+
+async def custom_plan_back(update: Update, context: CallbackContext) -> int:
+    """Возврат к вводу темы работы"""
+    keyboard = create_keyboard_with_back([], show_back=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(
+        "📝 Шаг 3/6: Укажите тему работы:",
+        reply_markup=reply_markup
+    )
+    context.user_data["current_step"] = WORK_THEME
+    # Сбрасываем данные о плане при возврате
+    context.user_data.pop("plan_entered", None)
+    context.user_data.pop("custom_plan", None)
+    context.user_data.pop("use_custom_plan", None)
+    return WORK_THEME
+
+async def preferences_back(update: Update, context: CallbackContext) -> int:
+    """Возврат к выбору типа плана"""
+    keyboard = create_keyboard_with_back([
+        ["🤖 Автоматический план"],
+        ["✍️ Создать свой план"]
+    ], show_back=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(
+        "📝 Шаг 4/6: Выберите способ создания плана работы:",
+        reply_markup=reply_markup
+    )
+    context.user_data["current_step"] = CUSTOM_PLAN
+    # Сбрасываем данные о плане при возврате
+    context.user_data.pop("plan_entered", None)
+    context.user_data.pop("custom_plan", None)
+    context.user_data.pop("use_custom_plan", None)
+    context.user_data.pop("preferences", None)
+    return CUSTOM_PLAN
 
 # Ограничение страниц по типам работы
-PAGE_LIMITS = {"Эссе": 10, "Доклад": 10, "Реферат": 20, "Проект": 20, "Курсовая работа": 30}
+PAGE_LIMITS = {"Эссе": 10, "Доклад": 10, "Реферат": 20, "Проект": 20, "Курсовая работа": 30, "Дипломная работа": 70}
 # Семафор для ограничения одновременных запросов к DeepSeek API
 # Настройки семафора:
 # 5 - для малой нагрузки (1-10 пользователей)
@@ -1044,17 +1184,44 @@ async def order(update: Update, context: CallbackContext) -> int:
     
     await log_user_action(user_id, "order_command")
     # Updated keyboard to include prices for each work type
-    keyboard = [
+    keyboard = create_keyboard_with_back([
         ["📝 Эссе - 300₽", "📜 Доклад - 300₽"],
         ["📖 Реферат - 400₽", "💼 Проект - 400₽"],
-        ["📚 Курсовая работа - 500₽"]
-    ]
+        ["📚 Курсовая работа - 500₽"],
+        ["🎓 Дипломная работа - 800₽"]
+    ], show_back=False)
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text("🥷 *Выберите тип работы:* 🥷", reply_markup=reply_markup)
+    context.user_data["current_step"] = WORK_TYPE
     return WORK_TYPE
+
+# Обработчик inline кнопки "Назад"
+async def back_button_handler(update: Update, context: CallbackContext) -> int:
+    """Обработчик inline кнопки 'Назад'"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Эмулируем нажатие кнопки "Назад" как текстовое сообщение
+    # Создаем фейковое обновление с текстом "◀️ Назад"
+    class FakeMessage:
+        def __init__(self):
+            self.text = "◀️ Назад"
+            self.chat_id = query.message.chat_id
+    
+    class FakeUpdate:
+        def __init__(self):
+            self.message = FakeMessage()
+            self.effective_user = query.from_user
+    
+    fake_update = FakeUpdate()
+    return await go_back_handler(fake_update, context)
 
 # Обработчики этапов заказа
 async def work_type_handler(update: Update, context: CallbackContext) -> int:
+    # Проверяем, не нажал ли пользователь "Назад"
+    if update.message.text == "◀️ Назад":
+        return await go_back_handler(update, context)
+    
     # Parse selected work type and price if present
     selection = update.message.text
     if " - " in selection:
@@ -1067,13 +1234,22 @@ async def work_type_handler(update: Update, context: CallbackContext) -> int:
     else:
         context.user_data["work_type"] = selection
         context.user_data["price"] = None
-    # Шаг 1 из 5: дисциплина
+    
+    # Шаг 1 из 6: дисциплина
+    keyboard = create_keyboard_with_back([], show_back=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text(
-        "📝 Шаг 1/5: Укажите название дисциплины (например, Математика):"
+        "📝 Шаг 1/6: Укажите название дисциплины (например, Математика):",
+        reply_markup=reply_markup
     )
+    context.user_data["current_step"] = SCIENCE_NAME
     return SCIENCE_NAME
 
 async def science_name_handler(update: Update, context: CallbackContext) -> int:
+    # Проверяем, не нажал ли пользователь "Назад"
+    if update.message.text == "◀️ Назад":
+        return await go_back_handler(update, context)
+    
     try:
         science_name = validate_user_input(update.message.text, 100)
         context.user_data["science_name"] = science_name
@@ -1081,16 +1257,25 @@ async def science_name_handler(update: Update, context: CallbackContext) -> int:
         await update.message.reply_text(f"⚠️ Ошибка: {e}")
         return SCIENCE_NAME
     
-    # Шаг 2 из 5: количество страниц (с учётом лимитов)
+    # Шаг 2 из 6: количество страниц (с учётом лимитов)
     work_type = context.user_data.get("work_type", "")
     clean_type = re.sub(r"[^А-Яа-яЁё ]", "", work_type).strip()
     max_pages = PAGE_LIMITS.get(clean_type, 10)
+    
+    keyboard = create_keyboard_with_back([], show_back=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text(
-        f"📝 Шаг 2/5: Введите количество страниц (максимум {max_pages}):"
+        f"📝 Шаг 2/6: Введите количество страниц (максимум {max_pages}):",
+        reply_markup=reply_markup
     )
+    context.user_data["current_step"] = PAGE_NUMBER
     return PAGE_NUMBER
 
 async def page_number_handler(update: Update, context: CallbackContext) -> int:
+    # Проверяем, не нажал ли пользователь "Назад"
+    if update.message.text == "◀️ Назад":
+        return await go_back_handler(update, context)
+    
     # Валидация числа страниц
     try:
         page = int(update.message.text)
@@ -1106,13 +1291,22 @@ async def page_number_handler(update: Update, context: CallbackContext) -> int:
         )
         return PAGE_NUMBER
     context.user_data["page_number"] = page
-    # Шаг 3 из 5: тема работы
+    
+    # Шаг 3 из 6: тема работы
+    keyboard = create_keyboard_with_back([], show_back=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text(
-        "📝 Шаг 3/5: Укажите тему работы:"
+        "📝 Шаг 3/6: Укажите тему работы:",
+        reply_markup=reply_markup
     )
+    context.user_data["current_step"] = WORK_THEME
     return WORK_THEME
 
 async def work_theme_handler(update: Update, context: CallbackContext) -> int:
+    # Проверяем, не нажал ли пользователь "Назад"
+    if update.message.text == "◀️ Назад":
+        return await go_back_handler(update, context)
+    
     try:
         work_theme = validate_user_input(update.message.text, 200)
         context.user_data["work_theme"] = work_theme
@@ -1120,49 +1314,178 @@ async def work_theme_handler(update: Update, context: CallbackContext) -> int:
         await update.message.reply_text(f"⚠️ Ошибка: {e}")
         return WORK_THEME
         
-    # Шаг 4 из 5: предпочтения
+    # Предлагаем выбор: автоматический план или пользовательский
+    keyboard = create_keyboard_with_back([
+        ["🤖 Автоматический план"],
+        ["✍️ Создать свой план"]
+    ], show_back=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text(
-        "📝 Шаг 4/5: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):"
-    )
-    return PREFERENCES
-
-async def preferences_handler(update: Update, context: CallbackContext) -> int:
-    try:
-        preferences = validate_user_input(update.message.text, 500)
-        context.user_data["preferences"] = preferences
-    except ValueError as e:
-        await update.message.reply_text(f"⚠️ Ошибка: {e}")
-        return PREFERENCES
-    
-    # Шаг 5 из 5: контактные данные
-    await update.message.reply_text(
-        "📞 Шаг 5/5: Укажите ваши контактные данные (email или телефон) для связи:"
-    )
-    return CUSTOMER_CONTACT
-
-async def contact_handler(update: Update, context: CallbackContext) -> int:
-    try:
-        contact = validate_contact(update.message.text.strip())
-        context.user_data["receipt_customer"] = contact
-    except ValueError as e:
-        await update.message.reply_text(f"⚠️ {e}. Попробуйте еще раз:")
-        return CUSTOMER_CONTACT
-        
-    work_type = context.user_data["work_type"]
-    price = context.user_data.get("price")
-    if price is None:
-        price = 300 if work_type in ["📝 Эссе","📜 Доклад"] else 400 if work_type in ["📖 Реферат","💼 Проект"] else 500
-    
-    # Создание реального платежа через YooKassa
-    keyboard = [[InlineKeyboardButton("💳 Оплатить заказ", callback_data="pay")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        f"💰 *Оплата заказа* 💰\n\n"
-        f"Сумма к оплате: {price} рублей\n\n"
-        "Нажмите кнопку ниже для перехода к оплате:",
+        "📝 Шаг 4/6: Выберите способ создания плана работы:",
         reply_markup=reply_markup
     )
-    return PAYMENT
+    context.user_data["current_step"] = CUSTOM_PLAN
+    return CUSTOM_PLAN
+
+async def custom_plan_handler(update: Update, context: CallbackContext) -> int:
+    # Проверяем, не нажал ли пользователь "Назад"
+    if update.message.text == "◀️ Назад":
+        return await go_back_handler(update, context)
+    
+    choice = update.message.text
+    
+    if choice == "🤖 Автоматический план":
+        # Автоматический план - переходим к предпочтениям
+        context.user_data["use_custom_plan"] = False
+        keyboard = create_keyboard_with_back([], show_back=True)
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text(
+            "📝 Шаг 5/6: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):",
+            reply_markup=reply_markup
+        )
+        context.user_data["current_step"] = PREFERENCES
+        return PREFERENCES
+    elif choice == "✍️ Создать свой план":
+        # Пользовательский план
+        context.user_data["use_custom_plan"] = True
+        keyboard = create_keyboard_with_back([], show_back=True)
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text(
+            "📝 Шаг 5/6: Введите план вашей работы.\n\n"
+            "Каждый пункт плана с новой строки, например:\n"
+            "1. Введение\n"
+            "2. Основная часть\n"
+            "3. Заключение\n\n"
+            "Или просто:\n"
+            "Введение\n"
+            "Основная часть\n"
+            "Заключение",
+            reply_markup=reply_markup
+        )
+        context.user_data["current_step"] = PREFERENCES
+        return PREFERENCES
+    else:
+        await update.message.reply_text(
+            "⚠️ Пожалуйста, выберите один из предложенных вариантов:",
+        )
+        return CUSTOM_PLAN
+
+async def preferences_handler(update: Update, context: CallbackContext) -> int:
+    # Проверяем, не нажал ли пользователь "Назад"
+    if update.message.text == "◀️ Назад":
+        return await go_back_handler(update, context)
+    
+    use_custom_plan = context.user_data.get("use_custom_plan", False)
+    plan_entered = context.user_data.get("plan_entered", False)
+    
+    if use_custom_plan and not plan_entered:
+        # Обрабатываем пользовательский план
+        try:
+            custom_plan_text = validate_user_input(update.message.text, 1000)
+            # Разбиваем план на отдельные пункты
+            plan_lines = [line.strip() for line in custom_plan_text.split('\n') if line.strip()]
+            
+            # Очищаем от нумерации, если есть
+            cleaned_plan = []
+            for line in plan_lines:
+                # Убираем нумерацию в начале строки
+                cleaned_line = re.sub(r'^\d+\.?\s*', '', line).strip()
+                if cleaned_line:
+                    cleaned_plan.append(cleaned_line)
+            
+            if len(cleaned_plan) < 2:
+                await update.message.reply_text(
+                    "⚠️ План должен содержать минимум 2 пункта. Попробуйте еще раз:"
+                )
+                return PREFERENCES
+            
+            # Проверяем соответствие количества пунктов заявленному количеству страниц
+            page_number = context.user_data.get("page_number", 0)
+            expected_chapters = max(1, page_number // 2)  # Минимум 1 пункт
+            plan_chapters = len(cleaned_plan)
+            
+            warning_text = ""
+            if plan_chapters < expected_chapters:
+                warning_text = f"\n\n⚠️ Рекомендация: Для {page_number} страниц обычно требуется {expected_chapters} пунктов плана, " \
+                              f"а у вас {plan_chapters}. Это может привести к меньшему объему итоговой работы."
+            elif plan_chapters > expected_chapters * 1.5:  # Если пунктов слишком много
+                warning_text = f"\n\n⚠️ Внимание: У вас {plan_chapters} пунктов плана для {page_number} страниц. " \
+                              f"Это может привести к поверхностному раскрытию темы каждого пункта."
+                
+            context.user_data["custom_plan"] = cleaned_plan
+            context.user_data["plan_entered"] = True
+            
+            # Показываем введенный план пользователю
+            plan_preview = "\n".join([f"{i+1}. {item}" for i, item in enumerate(cleaned_plan)])
+            keyboard = create_keyboard_with_back([], show_back=True)
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+            await update.message.reply_text(
+                f"✅ План принят:\n\n{plan_preview}{warning_text}\n\n📝 Шаг 6/6: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):",
+                reply_markup=reply_markup
+            )
+            return PREFERENCES
+            
+        except ValueError as e:
+            await update.message.reply_text(f"⚠️ Ошибка: {e}")
+            return PREFERENCES
+    else:
+        # Обрабатываем предпочтения (для автоматического плана или финальный шаг для пользовательского)
+        try:
+            preferences = validate_user_input(update.message.text, 500)
+            context.user_data["preferences"] = preferences
+        except ValueError as e:
+            await update.message.reply_text(f"⚠️ Ошибка: {e}")
+            return PREFERENCES
+        
+        # Переходим к оплате
+        work_type = context.user_data["work_type"]
+        price = context.user_data.get("price")
+        if price is None:
+            if work_type in ["📝 Эссе","📜 Доклад"]:
+                price = 300
+            elif work_type in ["📖 Реферат","💼 Проект"]:
+                price = 400
+            elif work_type == "📚 Курсовая работа":
+                price = 500
+            elif work_type == "🎓 Дипломная работа":
+                price = 800
+            else:
+                price = 300
+        
+        context.user_data["current_step"] = PAYMENT
+        
+        # Проверяем режим работы
+        if TESTING_MODE:
+            # Тестовый режим - бесплатное создание заказа
+            keyboard = [
+                [InlineKeyboardButton("🧪 ТЕСТОВЫЙ ЗАКАЗ (БЕСПЛАТНО)", callback_data="test_order")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="back")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"🧪 *ТЕСТОВЫЙ РЕЖИМ* 🧪\n\n"
+                f"Обычная стоимость: {price} рублей\n"
+                f"В тестовом режиме - БЕСПЛАТНО!\n\n"
+                "Нажмите кнопку ниже для создания тестового заказа:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            # Создание реального платежа через YooKassa
+            keyboard = [
+                [InlineKeyboardButton("💳 Оплатить заказ", callback_data="pay")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="back")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"💰 *Оплата заказа* 💰\n\n"
+                f"Сумма к оплате: {price} рублей\n\n"
+                "Нажмите кнопку ниже для перехода к оплате:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        return PAYMENT
+
 
 async def create_payment(update: Update, context: CallbackContext) -> int:
     try:
@@ -1188,7 +1511,7 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
         context.user_data["order_id"] = order_id
         
         work_type = context.user_data["work_type"]
-        price_map = {"Эссе": 300, "Доклад": 300, "Реферат": 400, "Проект": 400, "Курсовая работа": 500}
+        price_map = {"Эссе": 300, "Доклад": 300, "Реферат": 400, "Проект": 400, "Курсовая работа": 500, "Дипломная работа": 800}
         price = price_map.get(work_type, 300)
         context.user_data["price"] = price
         
@@ -1331,6 +1654,79 @@ async def monitor_payment(context: CallbackContext, chat_id: int, payment_id: st
         await context.bot.send_message(chat_id=chat_id, text="❌ Произошла ошибка при проверке статуса платежа.")
         return
 
+# Функция для обработки тестового заказа (без реальной оплаты)
+async def create_test_order(update: Update, context: CallbackContext) -> int:
+    """Создает тестовый заказ без реальной оплаты"""
+    try:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            "🧪 Тестовый заказ создан!\n"
+            "🔄 Начинаем генерацию вашей работы... Пожалуйста, подождите!"
+        )
+        
+        # Создаем заказ в базе данных
+        user_id = update.callback_query.from_user.id
+        order_data = {
+            "work_type": context.user_data.get("work_type", ""),
+            "science_name": context.user_data.get("science_name", ""),
+            "work_theme": context.user_data.get("work_theme", ""),
+            "page_number": context.user_data.get("page_number", 0),
+            "price": 0  # Бесплатно в тестовом режиме
+        }
+        order_id = await create_order(user_id, order_data)
+        await update_order_status(order_id, "test_paid")  # Отмечаем как тестовый заказ
+        
+        # Сразу начинаем генерацию (без ожидания платежа)
+        try:
+            # Генерация плана
+            plan_array = await generate_plan(context)
+            if not plan_array:
+                raise RuntimeError("План не сгенерирован")
+            context.user_data["plan_array"] = plan_array
+            
+            # Генерация документа
+            doc_io = await generate_text(plan_array, context)
+            if doc_io is None:
+                raise RuntimeError("Документ не создан")
+            
+            # Создаем безопасное имя файла
+            work_type = context.user_data.get("work_type", "Работа")
+            work_theme = context.user_data.get("work_theme", "Тема")
+            safe_type = sanitize_filename(work_type)
+            safe_theme = sanitize_filename(work_theme)
+            filename = f"{safe_type}_{safe_theme}.docx"
+            
+            # Отправляем готовый документ
+            await update.callback_query.message.reply_document(
+                document=doc_io, 
+                filename=filename,
+                caption="✅ Ваша работа готова! (Тестовый режим)\n🎉 Спасибо за использование NinjaEssayAI!"
+            )
+            
+            # Обновляем статус заказа как выполненный
+            await update_order_status(order_id, "test_completed")
+            
+        except Exception as gen_error:
+            logging.error(f"Ошибка при генерации в тестовом режиме: {gen_error}")
+            await update_order_status(order_id, "test_failed")
+            await update.callback_query.message.reply_text(
+                "❌ Произошла ошибка при генерации работы.\n"
+                "Попробуйте еще раз или обратитесь в поддержку."
+            )
+        
+        return ConversationHandler.END
+        
+    except Exception as e:
+        logging.error(f"Критическая ошибка в create_test_order: {e}")
+        try:
+            await update.callback_query.answer("❌ Системная ошибка")
+            await update.callback_query.edit_message_text(
+                "❌ Произошла системная ошибка. Пожалуйста, обратитесь в поддержку."
+            )
+        except:
+            pass
+        return ConversationHandler.END
+
 
 
 # Обработка оплаты и генерация документа
@@ -1382,6 +1778,35 @@ async def pay(update: Update, context: CallbackContext) -> int:
 
 # Enhanced error handling in the generate_plan function.
 async def generate_plan(context: CallbackContext) -> list:
+    # Проверяем, есть ли пользовательский план
+    use_custom_plan = context.user_data.get("use_custom_plan", False)
+    page_number = context.user_data.get("page_number", 0)
+    
+    if use_custom_plan:
+        custom_plan = context.user_data.get("custom_plan", [])
+        if custom_plan:
+            # Проверяем соответствие количества пунктов плана заявленному количеству страниц
+            expected_chapters = max(1, page_number // 2)  # Минимум 1 пункт
+            plan_chapters = len(custom_plan)
+            
+            logging.info(f"Пользовательский план: {custom_plan}")
+            logging.info(f"Заявлено страниц: {page_number}, пунктов в плане: {plan_chapters}, ожидалось: {expected_chapters}")
+            
+            # Если пунктов слишком мало для заявленного количества страниц, предупреждаем
+            if plan_chapters < expected_chapters:
+                try:
+                    chat_id = get_chat_id(context)
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"⚠️ Внимание: Для {page_number} страниц рекомендуется {expected_chapters} пунктов плана, "
+                             f"а у вас {plan_chapters}. Это может повлиять на объем работы."
+                    )
+                except Exception as chat_error:
+                    logging.error(f"Ошибка отправки предупреждения: {chat_error}")
+            
+            return custom_plan
+    
+    # Если пользовательского плана нет, генерируем автоматически
     logging.info("Запрос на генерация плана отправлен в DeepSeek API.")
     
     science_name = context.user_data.get("science_name", "")
@@ -1472,6 +1897,123 @@ def add_page_number(section):
     fldChar2.set(qn('w:fldCharType'), 'end')
     run._r.append(fldChar2)
 
+# Функция для добавления титульного листа
+def add_title_page(doc, work_type, work_theme, science_name, page_number):
+    """Добавляет титульный лист в документ"""
+    
+    # Название учебного заведения
+    university_p = doc.add_paragraph()
+    university_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    university_run = university_p.add_run("МИНИСТЕРСТВО ОБРАЗОВАНИЯ И НАУКИ РОССИЙСКОЙ ФЕДЕРАЦИИ\n")
+    university_run.font.name = 'Times New Roman'
+    university_run.font.size = Pt(14)
+    university_run.font.bold = True
+    
+    university_run2 = university_p.add_run("ФЕДЕРАЛЬНОЕ ГОСУДАРСТВЕННОЕ БЮДЖЕТНОЕ ОБРАЗОВАТЕЛЬНОЕ УЧРЕЖДЕНИЕ\n")
+    university_run2.font.name = 'Times New Roman'
+    university_run2.font.size = Pt(14)
+    university_run2.font.bold = True
+    
+    university_run3 = university_p.add_run("ВЫСШЕГО ОБРАЗОВАНИЯ\n")
+    university_run3.font.name = 'Times New Roman'
+    university_run3.font.size = Pt(14)
+    university_run3.font.bold = True
+    
+    university_run4 = university_p.add_run("«РОССИЙСКИЙ УНИВЕРСИТЕТ»")
+    university_run4.font.name = 'Times New Roman'
+    university_run4.font.size = Pt(14)
+    university_run4.font.bold = True
+    
+    # Добавляем отступ
+    doc.add_paragraph()
+    doc.add_paragraph()
+    doc.add_paragraph()
+    
+    # Кафедра
+    department_p = doc.add_paragraph()
+    department_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    department_run = department_p.add_run(f"Кафедра {science_name}")
+    department_run.font.name = 'Times New Roman'
+    department_run.font.size = Pt(14)
+    
+    # Добавляем отступ
+    doc.add_paragraph()
+    doc.add_paragraph()
+    
+    # Тип работы
+    work_type_p = doc.add_paragraph()
+    work_type_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    work_type_run = work_type_p.add_run(work_type.upper())
+    work_type_run.font.name = 'Times New Roman'
+    work_type_run.font.size = Pt(16)
+    work_type_run.font.bold = True
+    
+    # Добавляем отступ
+    doc.add_paragraph()
+    
+    # Тема работы
+    theme_p = doc.add_paragraph()
+    theme_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    theme_run = theme_p.add_run(f"на тему: «{work_theme}»")
+    theme_run.font.name = 'Times New Roman'
+    theme_run.font.size = Pt(14)
+    theme_run.font.bold = True
+    
+    # Добавляем отступ
+    doc.add_paragraph()
+    doc.add_paragraph()
+    doc.add_paragraph()
+    doc.add_paragraph()
+    
+    # Информация о студенте и преподавателе (справа)
+    info_table = doc.add_table(rows=6, cols=2)
+    info_table.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    
+    # Настраиваем таблицу
+    for row in info_table.rows:
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    
+    # Заполняем таблицу
+    info_table.cell(0, 0).text = "Дисциплина:"
+    info_table.cell(0, 1).text = science_name
+    
+    info_table.cell(1, 0).text = "Выполнил(а):"
+    info_table.cell(1, 1).text = "студент(ка) группы ___________"
+    
+    info_table.cell(2, 0).text = ""
+    info_table.cell(2, 1).text = "_________________________"
+    
+    info_table.cell(3, 0).text = "Проверил:"
+    info_table.cell(3, 1).text = "_________________________"
+    
+    info_table.cell(4, 0).text = ""
+    info_table.cell(4, 1).text = "(должность, ученая степень, звание)"
+    
+    info_table.cell(5, 0).text = ""
+    info_table.cell(5, 1).text = "_________________________"
+    
+    # Настраиваем шрифт в таблице
+    for row in info_table.rows:
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    run.font.name = 'Times New Roman'
+                    run.font.size = Pt(12)
+    
+    # Добавляем отступ
+    doc.add_paragraph()
+    doc.add_paragraph()
+    doc.add_paragraph()
+    
+    # Год и город
+    footer_p = doc.add_paragraph()
+    footer_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer_run = footer_p.add_run("Москва 2025")
+    footer_run.font.name = 'Times New Roman'
+    footer_run.font.size = Pt(14)
+
 # Генерация текста и создание документа (в памяти)
 async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
     logging.info("Начало генерации текста по главам плана.")
@@ -1479,6 +2021,7 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
     work_type = context.user_data["work_type"]
     work_theme = context.user_data["work_theme"]
     preferences = context.user_data["preferences"]
+    page_number = context.user_data.get("page_number", 0)
 
     if not plan_array:
         logging.error("План пуст. Невозможно сгенерировать текст.")
@@ -1492,6 +2035,13 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
             logging.error(f"Ошибка отправки сообщения: {chat_error}")
         return None
 
+    # Рассчитываем количество слов на главу на основе заявленного количества страниц
+    # Примерно 250-300 слов на страницу, распределяем равномерно между главами
+    total_words = page_number * 275  # Среднее количество слов на страницу
+    words_per_chapter = max(400, total_words // len(plan_array))  # Минимум 400 слов на главу
+    
+    logging.info(f"Запрошено страниц: {page_number}, глав в плане: {len(plan_array)}, слов на главу: {words_per_chapter}")
+
     # Функция для выполнения одного запроса к API
     async def fetch_chapter_text(chapter: str) -> tuple[str, str]:
         logging.info(f"Генерация текста для главы: {chapter}")
@@ -1499,7 +2049,7 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
             f"Действуй как специалист в области {science_name}, "
             f"напиши, строго с опорой на авторитетные источники, "
             f"главу: {chapter} в контексте написания {work_type} "
-            f"по теме: {work_theme} (напиши не менее 600 слов) "
+            f"по теме: {work_theme} (напиши не менее {words_per_chapter} слов) "
             f"(Напиши текст, в котором предложения будут иметь разную длину, "
             f"а также будет избегаться нахождение однокоренных слов "
             f"в соседних предложениях) "
@@ -1556,44 +2106,91 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
     # Создание документа в памяти
     doc = docx.Document()
     section = doc.sections[0]
-    section.top_margin = Cm(2)
-    section.bottom_margin = Cm(2)
-    section.left_margin = Cm(3)
-    section.right_margin = Cm(1.5)
+    # Настройка полей по требованиям: верх/низ 25мм, лево 30мм, право 10мм
+    section.top_margin = Cm(2.5)     # 25 мм
+    section.bottom_margin = Cm(2.5)  # 25 мм
+    section.left_margin = Cm(3.0)    # 30 мм
+    section.right_margin = Cm(1.0)   # 10 мм
 
-    # Установка стиля текста
+    # Установка стиля текста для всего документа
     style = doc.styles['Normal']
     font = style.font
     font.name = 'Times New Roman'
     font.size = Pt(14)
+    
+    # Настройка параграфа для стиля Normal
+    paragraph_format = style.paragraph_format
+    paragraph_format.line_spacing = 1.5  # Интервал 1.5
+    paragraph_format.first_line_indent = Cm(1.25)  # Отступ первой строки
 
     # Добавление нумерации страниц
     add_page_number(section)
 
-    # Добавление заголовка
-    heading = doc.add_heading(f"{work_type} по теме: {work_theme}", level=1)
-    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    heading.style.font.size = Pt(16)
+    # === ТИТУЛЬНЫЙ ЛИСТ ===
+    # Добавляем титульный лист
+    add_title_page(doc, work_type, work_theme, science_name, context.user_data.get("page_number", 0))
+    
+    # Добавляем разрыв страницы после титульного листа
+    doc.add_page_break()
+    
+    # === ОГЛАВЛЕНИЕ ===
+    # Добавляем заголовок "Оглавление"
+    contents_heading = doc.add_heading("ОГЛАВЛЕНИЕ", level=1)
+    contents_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in contents_heading.runs:
+        run.font.name = 'Times New Roman'
+        run.font.size = Pt(16)
+        run.font.bold = True
+    
+    # Добавляем пункты оглавления
+    for i, chapter in enumerate(plan_array, 1):
+        contents_p = doc.add_paragraph()
+        contents_p.paragraph_format.first_line_indent = Cm(0)
+        contents_p.paragraph_format.left_indent = Cm(0)
+        
+        # Добавляем номер и название главы
+        run = contents_p.add_run(f"{i}. {chapter}")
+        run.font.name = 'Times New Roman'
+        run.font.size = Pt(14)
+        
+        # Добавляем точки-заполнители и номер страницы
+        dots_run = contents_p.add_run("." * (50 - len(f"{i}. {chapter}")))
+        dots_run.font.name = 'Times New Roman'
+        dots_run.font.size = Pt(14)
+        
+        page_run = contents_p.add_run(f"{i + 2}")  # +2 потому что титульный лист и оглавление
+        page_run.font.name = 'Times New Roman'
+        page_run.font.size = Pt(14)
+    
+    # Добавляем разрыв страницы после оглавления
+    doc.add_page_break()
+
+    # === ОСНОВНОЕ СОДЕРЖАНИЕ ===
+    # Добавление основного заголовка работы
+    main_heading = doc.add_heading(f"{work_type} по теме: {work_theme}", level=1)
+    main_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # Настройка шрифта заголовка
+    for run in main_heading.runs:
+        run.font.name = 'Times New Roman'
+        run.font.size = Pt(16)
+        run.font.bold = True
 
     # Добавление текста глав в документ
     for chapter, chapter_text in chapters_text:
         chapter_heading = doc.add_heading(chapter, level=2)
         chapter_heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        chapter_heading.style.font.size = Pt(14)
+        # Настройка шрифта заголовка главы
+        for run in chapter_heading.runs:
+            run.font.name = 'Times New Roman'
+            run.font.size = Pt(14)
+        
         p = doc.add_paragraph(chapter_text)
         p.paragraph_format.line_spacing = 1.5
         p.paragraph_format.first_line_indent = Cm(1.25)
-
-    # Добавление списка литературы
-    doc.add_heading('Список литературы', level=1)
-    sources = [
-        "1. Иванов И.И. Основы программирования. Москва: Просвещение, 2020.",
-        "2. Петров П.П. Современные технологии. СПб: Питер, 2021.",
-        "3. Сидоров С.С. Введение в науку. Казань: Изд-во КГУ, 2022."
-    ]
-    for source in sources:
-        p = doc.add_paragraph(source)
-        p.paragraph_format.line_spacing = 1.5
+        # Убеждаемся, что текст использует правильный шрифт
+        for run in p.runs:
+            run.font.name = 'Times New Roman'
+            run.font.size = Pt(14)
 
     # Сохранение документа в память
     doc_io = io.BytesIO()
@@ -1618,10 +2215,12 @@ def main():
             SCIENCE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, science_name_handler)],
             PAGE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, page_number_handler)],
             WORK_THEME: [MessageHandler(filters.TEXT & ~filters.COMMAND, work_theme_handler)],
+            CUSTOM_PLAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_plan_handler)],
             PREFERENCES: [MessageHandler(filters.TEXT & ~filters.COMMAND, preferences_handler)],
-            CUSTOMER_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact_handler)],
             PAYMENT: [
                 CallbackQueryHandler(create_payment, pattern="^pay$"),
+                CallbackQueryHandler(create_test_order, pattern="^test_order$"),
+                CallbackQueryHandler(back_button_handler, pattern="^back$"),
                 CommandHandler("cancel", cancel)
             ]
         },
