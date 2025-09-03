@@ -1,0 +1,453 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+# Список пакетов для установки
+packages:
+  - python3
+  - python3-pip
+  - python3-venv
+  - git
+  - nginx
+  - fail2ban
+  - htop
+  - curl
+  - wget
+  - unzip
+  - sqlite3
+  - certbot
+  - python3-certbot-nginx
+  - supervisor
+  - ufw
+
+# Создание пользователя для бота
+users:
+  - name: botadmin
+    groups: [sudo, www-data]
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCyf2IAn5qcSnKq3RE7wON2uJxulyYuy2bAGdoZkVYM0DprffsMIv/20LgOib3SOTyU2ODcOx63zYBUFWXF7IrVDLL/Ry7KrqQcEVpT+dobMrMDHqFErvV565kWbSJdvxly29/a2v38sg+iBsAGYTR/y4wJSHRVcmRIhhxV1uSnKSTpku3r9KlxSNKlTpqQKc6eNQtLa1tzgx//1Zl1YeyB1HJzZakzNvZsggViiEruf5CrMWA0iZI5CXoT01WfGt+N2psp7ZNTrUhbpi8t5fcdRsYGxNXcpSwH4izZwqHy+X8pHSy0wuvpiDexF02DZQuNur4+rSBgGXP87IdmItzuV6yGOugGcXPqgOBSv6FS5PhlVivVYi0agUTUPIdvbBadqHEqRJ34OmqPiINl457/ItdsGGG8XG6IwrE1BRCyc26sursh3YteP+1Qw4Y760dvZUBHALqNnz3ThhcvHaJYtUczXgRMUjb/BE1KOAeZ7csg4acQe0U+8ErkClP5rc7mHDO9NgJMTA/jv5UoNTO084JKpeeT59rBk59ksabr2CIv50U8q/KeAIhjCay4BZBC5Mpf6nDOfDGyaQ9L/TL3AZCPTDwrlSkbDSF+r1AWmUDtBFD6iCXUgluC74Mo8FlnlH0N2TBqIHmCqRcdV8yVrLl11VCjD3livgQhUFA4CQ== ninjaessayai@timeweb
+    # Отключаем создание пользователя ubuntu по умолчанию
+users: []
+
+# Системные файлы конфигурации
+write_files:
+  # Оптимизация системы для Python приложения
+  - path: /etc/sysctl.d/99-bot-optimization.conf
+    content: |
+      # Оптимизация для Telegram бота
+      vm.swappiness=10
+      vm.dirty_ratio=15
+      vm.dirty_background_ratio=5
+      net.core.somaxconn=65535
+      net.core.netdev_max_backlog=5000
+      net.ipv4.ip_local_port_range=1024 65535
+      net.ipv4.tcp_fin_timeout=30
+      net.ipv4.tcp_keepalive_time=1200
+      net.ipv4.tcp_max_syn_backlog=8192
+    owner: root:root
+    permissions: '0644'
+
+  # Systemd сервис для бота
+  - path: /etc/systemd/system/ninjaessayai-bot.service
+    content: |
+      [Unit]
+      Description=NinjaEssayAI Telegram Bot
+      After=network.target network-online.target
+      Wants=network-online.target
+      Requires=network.target
+
+      [Service]
+      Type=simple
+      User=botadmin
+      Group=botadmin
+      WorkingDirectory=/opt/ninjaessayai_bot
+      Environment=PYTHONPATH=/opt/ninjaessayai_bot
+      Environment=PYTHONUNBUFFERED=1
+      ExecStart=/opt/ninjaessayai_bot/venv/bin/python bot.py
+      ExecReload=/bin/kill -HUP $MAINPID
+      Restart=always
+      RestartSec=10
+      KillMode=mixed
+      TimeoutStopSec=30
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=ninjaessayai-bot
+
+      # Ограничения ресурсов
+      MemoryMax=2G
+      MemoryHigh=1.5G
+      CPUQuota=150%
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root:root
+    permissions: '0644'
+
+  # Конфигурация Nginx для мониторинга
+  - path: /etc/nginx/sites-available/bot-status
+    content: |
+      server {
+          listen 80 default_server;
+          listen [::]:80 default_server;
+          server_name _;
+          
+          # Базовая страница статуса
+          location / {
+              return 200 "NinjaEssayAI Bot Server\nStatus: Running\nTime: $time_iso8601\n";
+              add_header Content-Type text/plain;
+              access_log off;
+          }
+          
+          # Health check endpoint
+          location /health {
+              access_log off;
+              return 200 "OK";
+              add_header Content-Type text/plain;
+          }
+          
+          # Status endpoint с подробной информацией
+          location /status {
+              access_log off;
+              proxy_pass http://127.0.0.1:8080/status;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+          }
+          
+          # Nginx статус (опционально)
+          location /nginx-status {
+              stub_status on;
+              access_log off;
+              allow 127.0.0.1;
+              deny all;
+          }
+      }
+    owner: root:root
+    permissions: '0644'
+
+  # Конфигурация Fail2Ban для защиты SSH
+  - path: /etc/fail2ban/jail.local
+    content: |
+      [DEFAULT]
+      bantime = 3600
+      findtime = 600
+      maxretry = 5
+      destemail = admin@example.com
+      sendername = Fail2Ban
+      mta = sendmail
+
+      [sshd]
+      enabled = true
+      port = 22
+      filter = sshd
+      logpath = /var/log/auth.log
+      maxretry = 3
+      bantime = 1800
+
+      [nginx-http-auth]
+      enabled = true
+      port = http,https
+      filter = nginx-http-auth
+      logpath = /var/log/nginx/error.log
+      maxretry = 5
+    owner: root:root
+    permissions: '0644'
+
+  # Скрипт автоматического развертывания бота
+  - path: /opt/deploy-bot.sh
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # Цвета для вывода
+      RED='\033[0;31m'
+      GREEN='\033[0;32m'
+      YELLOW='\033[1;33m'
+      BLUE='\033[0;34m'
+      NC='\033[0m'
+
+      echo -e "${GREEN}🚀 Автоматическое развертывание NinjaEssayAI Bot${NC}"
+      echo "=================================================="
+
+      # Переменные
+      BOT_DIR="/opt/ninjaessayai_bot"
+      REPO_URL="https://github.com/Dmitry140340/NinjaEssayAI.git"
+      VENV_PATH="$BOT_DIR/venv"
+
+      # Создание директорий
+      echo -e "${YELLOW}📁 Создание директорий...${NC}"
+      mkdir -p "$BOT_DIR"/{logs,data,backups,scripts}
+      cd "$BOT_DIR"
+
+      # Клонирование репозитория
+      if [ ! -d ".git" ]; then
+          echo -e "${YELLOW}📥 Клонирование репозитория...${NC}"
+          git clone "$REPO_URL" .
+      else
+          echo -e "${YELLOW}🔄 Обновление кода...${NC}"
+          git pull origin main
+      fi
+
+      # Создание виртуального окружения
+      if [ ! -d "$VENV_PATH" ]; then
+          echo -e "${YELLOW}🐍 Создание виртуального окружения...${NC}"
+          python3 -m venv "$VENV_PATH"
+      fi
+
+      # Активация окружения и установка зависимостей
+      echo -e "${YELLOW}📦 Установка зависимостей...${NC}"
+      source "$VENV_PATH/bin/activate"
+      pip install --upgrade pip
+      pip install -r requirements.txt
+
+      # Создание .env файла если его нет
+      if [ ! -f ".env" ]; then
+          echo -e "${YELLOW}⚙️  Создание файла конфигурации...${NC}"
+          cat > .env << 'EOF'
+      # Настройки Telegram Bot
+      TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN_HERE
+      
+      # Настройки DeepSeek API
+      DEEPSEEK_API_KEY=YOUR_DEEPSEEK_API_KEY_HERE
+      
+      # Настройки YooKassa
+      YOOKASSA_SHOP_ID=YOUR_SHOP_ID_HERE
+      YOOKASSA_SECRET_KEY=YOUR_SECRET_KEY_HERE
+      
+      # Настройки приложения
+      LOG_LEVEL=INFO
+      MAX_WORKERS=10
+      RATE_LIMIT_REQUESTS=5
+      RATE_LIMIT_WINDOW=3600
+      EOF
+          echo -e "${RED}⚠️  ВАЖНО: Отредактируйте файл .env с вашими настройками!${NC}"
+          echo -e "${BLUE}nano $BOT_DIR/.env${NC}"
+      fi
+
+      # Настройка прав доступа
+      echo -e "${YELLOW}🔒 Настройка прав доступа...${NC}"
+      chown -R botadmin:botadmin "$BOT_DIR"
+      chmod +x "$BOT_DIR"/*.py
+
+      # Создание базы данных если её нет
+      if [ ! -f "$BOT_DIR/user_activity.db" ]; then
+          echo -e "${YELLOW}🗄️  Создание базы данных...${NC}"
+          touch "$BOT_DIR/user_activity.db"
+          chown botadmin:botadmin "$BOT_DIR/user_activity.db"
+      fi
+
+      echo -e "${GREEN}✅ Развертывание завершено!${NC}"
+      echo -e "${BLUE}Следующие шаги:${NC}"
+      echo -e "${BLUE}1. Отредактируйте .env: nano $BOT_DIR/.env${NC}"
+      echo -e "${BLUE}2. Запустите бота: systemctl start ninjaessayai-bot${NC}"
+      echo -e "${BLUE}3. Проверьте статус: systemctl status ninjaessayai-bot${NC}"
+    owner: root:root
+    permissions: '0755'
+
+  # Скрипт мониторинга системы
+  - path: /opt/monitor-system.sh
+    content: |
+      #!/bin/bash
+      
+      echo "🔍 Мониторинг NinjaEssayAI Bot Server"
+      echo "===================================="
+      echo "Время: $(date)"
+      echo ""
+      
+      # Статус сервиса
+      echo "📊 Статус сервиса:"
+      if systemctl is-active --quiet ninjaessayai-bot; then
+          echo "✅ Bot сервис: ЗАПУЩЕН"
+          uptime_seconds=$(systemctl show -p ActiveEnterTimestamp ninjaessayai-bot --value | xargs -I {} date -d {} +%s)
+          current_seconds=$(date +%s)
+          uptime_duration=$((current_seconds - uptime_seconds))
+          uptime_formatted=$(date -d @$uptime_duration -u +%H:%M:%S)
+          echo "⏱️  Время работы: $uptime_formatted"
+      else
+          echo "❌ Bot сервис: ОСТАНОВЛЕН"
+      fi
+      
+      # Системные ресурсы
+      echo ""
+      echo "💻 Использование ресурсов:"
+      echo "CPU: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | awk -F'%' '{print $1}')"
+      echo "RAM: $(free -h | awk 'NR==2{printf "%.1f%% (%s/%s)", $3*100/$2, $3, $2}')"
+      echo "Диск: $(df -h / | awk 'NR==2{printf "%s (%s)", $5, $4}')"
+      echo "Load Average: $(uptime | awk -F'load average:' '{print $2}')"
+      
+      # Сетевые соединения
+      echo ""
+      echo "🌐 Сетевая активность:"
+      echo "Активные соединения: $(ss -t | wc -l)"
+      echo "Открытые порты: $(ss -tlnp | grep -E ':(22|80|443)' | wc -l)"
+      
+      # Логи бота
+      echo ""
+      echo "📋 Последние логи бота (5 строк):"
+      journalctl -u ninjaessayai-bot -n 5 --no-pager -q || echo "Логи недоступны"
+      
+      # Размер базы данных
+      if [ -f "/opt/ninjaessayai_bot/user_activity.db" ]; then
+          echo ""
+          echo "🗄️  База данных:"
+          db_size=$(du -h /opt/ninjaessayai_bot/user_activity.db | cut -f1)
+          echo "Размер БД: $db_size"
+      fi
+      
+      echo ""
+      echo "🔗 Полезные команды:"
+      echo "systemctl status ninjaessayai-bot  # Подробный статус"
+      echo "journalctl -u ninjaessayai-bot -f  # Просмотр логов"
+      echo "systemctl restart ninjaessayai-bot # Перезапуск"
+    owner: root:root
+    permissions: '0755'
+
+  # Скрипт бэкапа
+  - path: /opt/backup-bot.sh
+    content: |
+      #!/bin/bash
+      
+      BACKUP_DIR="/opt/ninjaessayai_bot/backups"
+      BOT_DIR="/opt/ninjaessayai_bot"
+      DATE=$(date +%Y%m%d_%H%M%S)
+      
+      echo "🔄 Создание бэкапа NinjaEssayAI Bot - $DATE"
+      
+      # Создаем директорию бэкапа если её нет
+      mkdir -p "$BACKUP_DIR"
+      
+      # Бэкап базы данных
+      if [ -f "$BOT_DIR/user_activity.db" ]; then
+          echo "📊 Бэкап базы данных..."
+          cp "$BOT_DIR/user_activity.db" "$BACKUP_DIR/user_activity_$DATE.db"
+          echo "✅ БД сохранена: user_activity_$DATE.db"
+      fi
+      
+      # Бэкап конфигурации
+      if [ -f "$BOT_DIR/.env" ]; then
+          echo "⚙️  Бэкап конфигурации..."
+          tar -czf "$BACKUP_DIR/config_$DATE.tar.gz" -C "$BOT_DIR" .env
+          echo "✅ Конфиг сохранен: config_$DATE.tar.gz"
+      fi
+      
+      # Бэкап логов
+      if [ -d "$BOT_DIR/logs" ]; then
+          echo "📋 Бэкап логов..."
+          tar -czf "$BACKUP_DIR/logs_$DATE.tar.gz" -C "$BOT_DIR" logs/
+          echo "✅ Логи сохранены: logs_$DATE.tar.gz"
+      fi
+      
+      # Очистка старых бэкапов (старше 7 дней)
+      echo "🧹 Очистка старых бэкапов..."
+      find "$BACKUP_DIR" -name "*.db" -mtime +7 -delete
+      find "$BACKUP_DIR" -name "*.tar.gz" -mtime +7 -delete
+      
+      # Показать размер бэкапов
+      echo "📁 Общий размер бэкапов: $(du -sh $BACKUP_DIR | cut -f1)"
+      echo "✅ Бэкап завершен!"
+    owner: root:root
+    permissions: '0755'
+
+# Команды для выполнения при первом запуске
+runcmd:
+  # Применяем системные оптимизации
+  - sysctl -p /etc/sysctl.d/99-bot-optimization.conf
+
+  # Настройка часового пояса
+  - timedatectl set-timezone Europe/Moscow
+
+  # Обновление локали
+  - locale-gen ru_RU.UTF-8
+  - update-locale LANG=ru_RU.UTF-8
+
+  # Настройка UFW (Uncomplicated Firewall)
+  - ufw --force enable
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow ssh
+  - ufw allow http
+  - ufw allow https
+
+  # Настройка Nginx
+  - rm -f /etc/nginx/sites-enabled/default
+  - ln -sf /etc/nginx/sites-available/bot-status /etc/nginx/sites-enabled/
+  - nginx -t
+  - systemctl enable nginx
+  - systemctl start nginx
+
+  # Настройка Fail2Ban
+  - systemctl enable fail2ban
+  - systemctl start fail2ban
+
+  # Создание пользователя для бота
+  - useradd -m -s /bin/bash -G sudo,www-data botadmin || true
+  - mkdir -p /home/botadmin/.ssh
+  - echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCyf2IAn5qcSnKq3RE7wON2uJxulyYuy2bAGdoZkVYM0DprffsMIv/20LgOib3SOTyU2ODcOx63zYBUFWXF7IrVDLL/Ry7KrqQcEVpT+dobMrMDHqFErvV565kWbSJdvxly29/a2v38sg+iBsAGYTR/y4wJSHRVcmRIhhxV1uSnKSTpku3r9KlxSNKlTpqQKc6eNQtLa1tzgx//1Zl1YeyB1HJzZakzNvZsggViiEruf5CrMWA0iZI5CXoT01WfGt+N2psp7ZNTrUhbpi8t5fcdRsYGxNXcpSwH4izZwqHy+X8pHSy0wuvpiDexF02DZQuNur4+rSBgGXP87IdmItzuV6yGOugGcXPqgOBSv6FS5PhlVivVYi0agUTUPIdvbBadqHEqRJ34OmqPiINl457/ItdsGGG8XG6IwrE1BRCyc26sursh3YteP+1Qw4Y760dvZUBHALqNnz3ThhcvHaJYtUczXgRMUjb/BE1KOAeZ7csg4acQe0U+8ErkClP5rc7mHDO9NgJMTA/jv5UoNTO084JKpeeT59rBk59ksabr2CIv50U8q/KeAIhjCay4BZBC5Mpf6nDOfDGyaQ9L/TL3AZCPTDwrlSkbDSF+r1AWmUDtBFD6iCXUgluC74Mo8FlnlH0N2TBqIHmCqRcdV8yVrLl11VCjD3livgQhUFA4CQ== ninjaessayai@timeweb" > /home/botadmin/.ssh/authorized_keys
+  - chown -R botadmin:botadmin /home/botadmin/.ssh
+  - chmod 700 /home/botadmin/.ssh
+  - chmod 600 /home/botadmin/.ssh/authorized_keys
+
+  # Настройка sudo без пароля для botadmin
+  - echo "botadmin ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/botadmin
+  - chmod 440 /etc/sudoers.d/botadmin
+
+  # Запуск автоматического развертывания
+  - /opt/deploy-bot.sh
+
+  # Настройка автоматических бэкапов (каждый день в 3:00)
+  - echo "0 3 * * * root /opt/backup-bot.sh >> /var/log/bot-backup.log 2>&1" >> /etc/crontab
+
+  # Настройка ротации логов
+  - |
+    cat > /etc/logrotate.d/ninjaessayai-bot << 'EOF'
+    /opt/ninjaessayai_bot/logs/*.log {
+        daily
+        missingok
+        rotate 7
+        compress
+        delaycompress
+        notifempty
+        sharedscripts
+        postrotate
+            systemctl reload ninjaessayai-bot > /dev/null 2>&1 || true
+        endscript
+    }
+    EOF
+
+  # Включение systemd сервиса
+  - systemctl daemon-reload
+  - systemctl enable ninjaessayai-bot
+
+  # Создание ссылок на скрипты для удобства
+  - ln -sf /opt/monitor-system.sh /usr/local/bin/bot-monitor
+  - ln -sf /opt/backup-bot.sh /usr/local/bin/bot-backup
+  - ln -sf /opt/deploy-bot.sh /usr/local/bin/bot-deploy
+
+  # Финальная настройка прав
+  - chown -R botadmin:botadmin /opt/ninjaessayai_bot
+
+# Перезагрузка после настройки
+power_state:
+  mode: reboot
+  timeout: 30
+  condition: True
+
+# Финальное сообщение
+final_message: |
+  ✅ NinjaEssayAI Bot Server успешно настроен!
+  
+  🔧 Следующие шаги:
+  1. Подключитесь по SSH: ssh botadmin@YOUR_SERVER_IP
+  2. Отредактируйте .env: nano /opt/ninjaessayai_bot/.env
+  3. Запустите бота: sudo systemctl start ninjaessayai-bot
+  
+  📊 Полезные команды:
+  - bot-monitor     # Мониторинг системы
+  - bot-backup      # Создать бэкап
+  - bot-deploy      # Переразвертывание
+  
+  🌐 Проверка статуса: http://YOUR_SERVER_IP/health
+  📋 Логи: journalctl -u ninjaessayai-bot -f
+  
+  ⚠️  НЕ ЗАБУДЬТЕ: Отредактировать файл .env с вашими токенами!

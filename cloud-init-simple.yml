@@ -1,0 +1,86 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - python3
+  - python3-pip
+  - python3-venv
+  - git
+  - nginx
+  - fail2ban
+  - htop
+  - curl
+  - sqlite3
+
+users: []
+
+write_files:
+  - path: /etc/systemd/system/ninjaessayai-bot.service
+    content: |
+      [Unit]
+      Description=NinjaEssayAI Telegram Bot
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory=/opt/ninjaessayai_bot
+      ExecStart=/opt/ninjaessayai_bot/venv/bin/python bot.py
+      Restart=always
+      RestartSec=10
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root:root
+    permissions: '0644'
+
+  - path: /opt/setup-bot.sh
+    content: |
+      #!/bin/bash
+      set -e
+      
+      echo "🚀 Быстрая настройка NinjaEssayAI Bot"
+      
+      # Создание директории
+      mkdir -p /opt/ninjaessayai_bot
+      cd /opt/ninjaessayai_bot
+      
+      # Клонирование репозитория
+      git clone https://github.com/Dmitry140340/NinjaEssayAI.git .
+      
+      # Создание виртуального окружения
+      python3 -m venv venv
+      source venv/bin/activate
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      
+      # Создание .env файла
+      cat > .env << 'EOF'
+      TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN_HERE
+      DEEPSEEK_API_KEY=YOUR_DEEPSEEK_API_KEY_HERE
+      YOOKASSA_SHOP_ID=YOUR_SHOP_ID_HERE
+      YOOKASSA_SECRET_KEY=YOUR_SECRET_KEY_HERE
+      EOF
+      
+      echo "✅ Настройка завершена!"
+      echo "⚠️  Отредактируйте /opt/ninjaessayai_bot/.env"
+      echo "🚀 Запуск: systemctl start ninjaessayai-bot"
+    owner: root:root
+    permissions: '0755'
+
+runcmd:
+  - /opt/setup-bot.sh
+  - systemctl daemon-reload
+  - systemctl enable ninjaessayai-bot
+  - ufw --force enable
+  - ufw allow ssh
+  - ufw allow http
+
+final_message: |
+  ✅ Сервер готов!
+  
+  Следующие шаги:
+  1. Отредактируйте: nano /opt/ninjaessayai_bot/.env
+  2. Запустите: systemctl start ninjaessayai-bot
+  3. Проверьте: systemctl status ninjaessayai-bot

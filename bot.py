@@ -1518,6 +1518,10 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
         context.user_data["price"] = price
         
         try:
+            # Отладочное логирование перед созданием платежа
+            logging.info(f"Создание платежа для заказа {order_id}, сумма: {price}")
+            logging.info(f"Данные получателя: email=user{user_id}@ninjaessayai.com")
+            
             payment = Payment.create({
                 "amount": {"value": f"{price}.00", "currency": "RUB"},
                 "confirmation": {"type": "redirect", "return_url": "https://t.me/your_bot"},
@@ -1526,21 +1530,25 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
                 "metadata": {"order_id": str(order_id)},
                 "receipt": {
                     "customer": {
-                        "email": "customer@ninjaessayai.com"
+                        "email": f"user{user_id}@ninjaessayai.com"
                     },
                     "items": [
                         {
-                            "description": f"{work_type} - написание работы",
+                            "description": f"Написание работы: {work_type}",
                             "quantity": "1.00",
                             "amount": {
                                 "value": f"{price}.00",
                                 "currency": "RUB"
                             },
-                            "vat_code": 1
+                            "vat_code": 1,
+                            "payment_mode": "full_payment",
+                            "payment_subject": "service"
                         }
                     ]
                 }
             }, uuid.uuid4())
+            
+            logging.info(f"Платеж создан успешно: {payment.id}")
             
             # Обновляем заказ с payment_id
             await update_order_status(order_id, "payment_created", payment.id)
@@ -1558,7 +1566,14 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
             return ConversationHandler.END
             
         except Exception as payment_error:
+            # Более подробное логирование ошибки
+            error_details = str(payment_error)
+            if hasattr(payment_error, '__dict__'):
+                error_details = getattr(payment_error, '__dict__', str(payment_error))
+            
             logging.error(f"Ошибка создания платежа: {payment_error}")
+            logging.error(f"Детали ошибки: {error_details}")
+            
             await update_order_status(order_id, "payment_failed")
             await update.callback_query.answer("❌ Ошибка создания платежа")
             await update.callback_query.edit_message_text(
