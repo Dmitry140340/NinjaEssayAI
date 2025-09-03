@@ -5,6 +5,7 @@ import sqlite3
 import time
 import csv
 import sys
+import logging
 from collections import defaultdict
 try:
     import psutil
@@ -39,8 +40,8 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
 
-# 🧪 ТЕСТОВЫЙ РЕЖИМ - установите в True для тестирования без реальных платежей
-TESTING_MODE = True
+# 🧪 ТЕСТОВЫЙ РЕЖИМ - установите в False для рабочего режима с реальными платежами
+TESTING_MODE = False
 
 # Администраторы бота
 ADMIN_IDS = [659874549]  # Ваш Telegram ID как администратор
@@ -1086,6 +1087,7 @@ async def go_back_handler(update: Update, context: CallbackContext) -> int:
     return WORK_TYPE
 
 # Функции для возврата на конкретные шаги
+
 async def science_name_back(update: Update, context: CallbackContext) -> int:
     """Возврат к выбору типа работы"""
     keyboard = create_keyboard_with_back([
