@@ -1523,7 +1523,23 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
                 "confirmation": {"type": "redirect", "return_url": "https://t.me/your_bot"},
                 "capture": True,
                 "description": f"{work_type} - {context.user_data.get('work_theme', 'Тема не указана')}",
-                "metadata": {"order_id": str(order_id)}
+                "metadata": {"order_id": str(order_id)},
+                "receipt": {
+                    "customer": {
+                        "email": "customer@ninjaessayai.com"
+                    },
+                    "items": [
+                        {
+                            "description": f"{work_type} - написание работы",
+                            "quantity": "1.00",
+                            "amount": {
+                                "value": f"{price}.00",
+                                "currency": "RUB"
+                            },
+                            "vat_code": 1
+                        }
+                    ]
+                }
             }, uuid.uuid4())
             
             # Обновляем заказ с payment_id
