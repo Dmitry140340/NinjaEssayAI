@@ -1,0 +1,59 @@
+#cloud-config
+
+# Минимальный cloud-init для быстрого доступа
+users:
+  - name: botadmin
+    groups: [adm, cdrom, sudo, dip, plugdev]
+    lock_passwd: false
+    passwd: '$6$rounds=4096$saltsalt$3xkV7S/j9.QWJ8.4.rZ7Qv1wQ6V0V9X6Y0U2.3G9M5N7K8L9M0N1P2Q3R4S5T6U7V8W9X0Y1Z2A3B4C5D6E7F8'
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDummy
+
+# Простые пакеты
+packages:
+  - openssh-server
+  - python3
+  - python3-pip
+  - git
+
+# Включить SSH
+ssh_pwauth: true
+disable_root: false
+
+# Простая команда запуска
+runcmd:
+  # Убедиться что SSH работает
+  - systemctl enable ssh
+  - systemctl start ssh
+  - ufw allow 22/tcp
+  - ufw --force enable
+  
+  # Простая веб-страница
+  - apt-get update
+  - apt-get install -y nginx
+  - echo "SSH Ready - NinjaEssayAI Server" > /var/www/html/index.html
+  - systemctl enable nginx
+  - systemctl start nginx
+  
+  # Клонировать и запустить бота
+  - cd /home/botadmin
+  - git clone https://github.com/Dmitry140340/NinjaEssayAI.git
+  - cd NinjaEssayAI
+  - pip3 install -r requirements.txt
+  
+  # Создать .env с вашими токенами (замените на реальные)
+  - echo "TELEGRAM_BOT_TOKEN=7468939668:AAECFaAnV7V8V_hLTmILmqKnkVkRRUMJy8c" > .env
+  - echo "DEEPSEEK_API_KEY=sk-d0905959a24144c7b6063a7c9b2b4b6c" >> .env
+  - echo "YOOKASSA_SHOP_ID=467003" >> .env  
+  - echo "YOOKASSA_SECRET_KEY=live_MzkzYWM5ZmYtZDMzOS00OGY2LTk1Y2EtMjMzYzIyMGE3YmNi" >> .env
+  - echo "TESTING_MODE=False" >> .env
+  
+  # Запустить бота
+  - nohup python3 bot.py > /var/log/ninjabot.log 2>&1 &
+  
+  # Сообщить что готово
+  - echo "Setup completed at $(date)" > /home/botadmin/setup_complete.txt
+
+final_message: "NinjaEssayAI server setup completed. SSH should be available on port 22."

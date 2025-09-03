@@ -1554,11 +1554,16 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
             await update_order_status(order_id, "payment_created", payment.id)
             
             await update.callback_query.answer()
+            
+            # Создаем красивую кнопку оплаты
+            payment_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Перейти к оплате", url=payment.confirmation.confirmation_url)]
+            ])
+            
             await update.callback_query.edit_message_text(
                 f"💳 Оплата {price}₽\n\n"
-                f"🔗 [Перейти к оплате]({payment.confirmation.confirmation_url})\n\n"
                 "После оплаты работа будет создана автоматически (5-15 минут).",
-                parse_mode='Markdown'
+                reply_markup=payment_keyboard
             )
             
             # Запускаем мониторинг платежа
