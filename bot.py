@@ -33,7 +33,7 @@ from yookassa import Configuration, Payment, Refund
 
 # Загрузка переменных окружения
 load_dotenv()
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 # Значения по умолчанию для YooKassa удалены для безопасности
@@ -1067,21 +1067,28 @@ async def go_back_handler(update: Update, context: CallbackContext) -> int:
     """Обработчик возврата на предыдущий шаг"""
     current_step = context.user_data.get("current_step", WORK_TYPE)
     
+    logging.info(f"Пользователь нажал 'Назад' на шаге: {current_step}")
+    
     if current_step == WORK_TYPE:
         await update.message.reply_text("Вы уже на первом шаге. Используйте /cancel для отмены заказа.")
         return await order(update, context)
     elif current_step == SCIENCE_NAME:
-        return await order(update, context)
-    elif current_step == PAGE_NUMBER:
+        logging.info("Возврат к выбору типа работы")
         return await science_name_back(update, context)
-    elif current_step == WORK_THEME:
+    elif current_step == PAGE_NUMBER:
+        logging.info("Возврат к вводу дисциплины")
         return await page_number_back(update, context)
-    elif current_step == CUSTOM_PLAN:
+    elif current_step == WORK_THEME:
+        logging.info("Возврат к вводу количества страниц")
         return await work_theme_back(update, context)
-    elif current_step == PREFERENCES:
-        # Всегда возвращаемся на предыдущий шаг (CUSTOM_PLAN), независимо от типа плана
+    elif current_step == CUSTOM_PLAN:
+        logging.info("Возврат к вводу темы работы")
         return await custom_plan_back(update, context)
+    elif current_step == PREFERENCES:
+        logging.info("Возврат к выбору типа плана")
+        return await preferences_back(update, context)
     elif current_step == PAYMENT:
+        logging.info("Возврат к предпочтениям (с этапа оплаты)")
         return await preferences_back(update, context)
     
     return WORK_TYPE
@@ -1144,22 +1151,48 @@ async def custom_plan_back(update: Update, context: CallbackContext) -> int:
 
 async def preferences_back(update: Update, context: CallbackContext) -> int:
     """Возврат к выбору типа плана"""
-    keyboard = create_keyboard_with_back([
-        ["🤖 Автоматический план"],
-        ["✍️ Создать свой план"]
-    ], show_back=True)
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    await update.message.reply_text(
-        "📝 Шаг 4/6: Выберите способ создания плана работы:",
-        reply_markup=reply_markup
-    )
-    context.user_data["current_step"] = CUSTOM_PLAN
-    # Сбрасываем данные о плане при возврате
-    context.user_data.pop("plan_entered", None)
-    context.user_data.pop("custom_plan", None)
-    context.user_data.pop("use_custom_plan", None)
+    # Сбрасываем данные о предпочтениях при возврате
     context.user_data.pop("preferences", None)
-    return CUSTOM_PLAN
+    
+    # Проверяем, был ли введён пользовательский план
+    use_custom_plan = context.user_data.get("use_custom_plan", False)
+    plan_entered = context.user_data.get("plan_entered", False)
+    
+    if use_custom_plan and plan_entered:
+        # Если план уже был введён, возвращаемся к выбору типа плана
+        # но сбрасываем информацию о введённом плане
+        context.user_data.pop("plan_entered", None)
+        context.user_data.pop("custom_plan", None)
+        context.user_data.pop("use_custom_plan", None)
+        
+        keyboard = create_keyboard_with_back([
+            ["🤖 Автоматический план"],
+            ["✍️ Создать свой план"]
+        ], show_back=True)
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text(
+            "📝 Шаг 4/6: Выберите способ создания плана работы:",
+            reply_markup=reply_markup
+        )
+        context.user_data["current_step"] = CUSTOM_PLAN
+        return CUSTOM_PLAN
+    else:
+        # Если план не был введён, также возвращаемся к выбору типа плана
+        keyboard = create_keyboard_with_back([
+            ["🤖 Автоматический план"],
+            ["✍️ Создать свой план"]
+        ], show_back=True)
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text(
+            "📝 Шаг 4/6: Выберите способ создания плана работы:",
+            reply_markup=reply_markup
+        )
+        context.user_data["current_step"] = CUSTOM_PLAN
+        # Сбрасываем данные о плане при возврате
+        context.user_data.pop("plan_entered", None)
+        context.user_data.pop("custom_plan", None)
+        context.user_data.pop("use_custom_plan", None)
+        return CUSTOM_PLAN
 
 # Ограничение страниц по типам работы
 PAGE_LIMITS = {"Эссе": 10, "Доклад": 10, "Реферат": 20, "Проект": 20, "Курсовая работа": 30, "Дипломная работа": 70}
@@ -1199,24 +1232,58 @@ async def order(update: Update, context: CallbackContext) -> int:
 
 # Обработчик inline кнопки "Назад"
 async def back_button_handler(update: Update, context: CallbackContext) -> int:
-    """Обработчик inline кнопки 'Назад'"""
+    """Обработчик inline кнопки 'Назад' на этапе оплаты"""
     query = update.callback_query
     await query.answer()
     
-    # Эмулируем нажатие кнопки "Назад" как текстовое сообщение
-    # Создаем фейковое обновление с текстом "◀️ Назад"
-    class FakeMessage:
-        def __init__(self):
-            self.text = "◀️ Назад"
-            self.chat_id = query.message.chat_id
+    # Возвращаемся к этапу предпочтений
+    use_custom_plan = context.user_data.get("use_custom_plan", False)
+    plan_entered = context.user_data.get("plan_entered", False)
     
-    class FakeUpdate:
-        def __init__(self):
-            self.message = FakeMessage()
-            self.effective_user = query.from_user
+    # Сбрасываем данные о предпочтениях
+    context.user_data.pop("preferences", None)
+    context.user_data["current_step"] = PREFERENCES
     
-    fake_update = FakeUpdate()
-    return await go_back_handler(fake_update, context)
+    # Удаляем сообщение с кнопкой оплаты
+    try:
+        await query.message.delete()
+    except:
+        pass
+    
+    if use_custom_plan and plan_entered:
+        # Если был пользовательский план, возвращаемся к вводу предпочтений
+        keyboard = create_keyboard_with_back([], show_back=True)
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await query.message.reply_text(
+            "📝 Шаг 6/6: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):",
+            reply_markup=reply_markup
+        )
+    elif use_custom_plan and not plan_entered:
+        # Возвращаемся к вводу плана
+        keyboard = create_keyboard_with_back([], show_back=True)
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await query.message.reply_text(
+            "📝 Шаг 5/6: Введите план вашей работы.\n\n"
+            "Каждый пункт плана с новой строки, например:\n"
+            "1. Введение\n"
+            "2. Основная часть\n"
+            "3. Заключение\n\n"
+            "Или просто:\n"
+            "Введение\n"
+            "Основная часть\n"
+            "Заключение",
+            reply_markup=reply_markup
+        )
+    else:
+        # Был автоматический план, возвращаемся к предпочтениям
+        keyboard = create_keyboard_with_back([], show_back=True)
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await query.message.reply_text(
+            "📝 Шаг 5/6: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):",
+            reply_markup=reply_markup
+        )
+    
+    return PREFERENCES
 
 # Обработчики этапов заказа
 async def work_type_handler(update: Update, context: CallbackContext) -> int:
@@ -2239,7 +2306,18 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
     return doc_io
 
 async def cancel(update: Update, context: CallbackContext) -> int:
-    await update.message.reply_text("Заказ отменен.")
+    """Обработчик отмены заказа"""
+    user_id = update.effective_user.id
+    await log_user_action(user_id, "cancel_order")
+    
+    keyboard = [["/order"], ["/help", "/menu"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        "❌ Заказ отменён.\n\n"
+        "Вы можете начать новый заказ с помощью команды /order",
+        reply_markup=reply_markup
+    )
     return ConversationHandler.END
 
 # Основная функция

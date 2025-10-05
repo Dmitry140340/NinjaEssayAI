@@ -44,7 +44,7 @@ runcmd:
   - pip3 install -r requirements.txt
   
   # Создать .env с вашими токенами (замените на реальные)
-  - echo "TELEGRAM_BOT_TOKEN=7468939668:AAECFaAnV7V8V_hLTmILmqKnkVkRRUMJy8c" > .env
+  - echo "TELEGRAM_BOT_TOKEN=7860525094:AAETNSM92hnralH0x4QwhnzK4TvLbBELiSQ" > .env
   - echo "DEEPSEEK_API_KEY=sk-d0905959a24144c7b6063a7c9b2b4b6c" >> .env
   - echo "YOOKASSA_SHOP_ID=467003" >> .env  
   - echo "YOOKASSA_SECRET_KEY=live_MzkzYWM5ZmYtZDMzOS00OGY2LTk1Y2EtMjMzYzIyMGE3YmNi" >> .env
