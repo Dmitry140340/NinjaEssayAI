@@ -6,6 +6,7 @@ import time
 import csv
 import sys
 import logging
+import aiohttp
 from collections import defaultdict
 try:
     import psutil
@@ -15,7 +16,7 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackContext, MessageHandler, filters, ConversationHandler, CallbackQueryHandler
 from openai import AsyncOpenAI
 import docx
-from docx.shared import Pt, Cm
+from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.enum.section import WD_SECTION
 from docx.oxml.ns import qn
@@ -35,10 +36,16 @@ from yookassa import Configuration, Payment, Refund
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 # Значения по умолчанию для YooKassa удалены для безопасности
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
+
+# Настройки Coze API для поиска источников
+COZE_API_TOKEN = os.getenv("COZE_API_TOKEN")
+COZE_WORKFLOW_ID = os.getenv("COZE_WORKFLOW_ID")
+COZE_SPACE_ID = os.getenv("COZE_SPACE_ID")
+COZE_API_URL = os.getenv("COZE_API_URL", "https://api.coze.com/v1/workflow/run")
 
 # 🧪 ТЕСТОВЫЙ РЕЖИМ - установите в False для рабочего режима с реальными платежами
 TESTING_MODE = False
@@ -66,6 +73,12 @@ if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
     logging.warning(
         "Переменные окружения YOOKASSA_SHOP_ID или YOOKASSA_SECRET_KEY "
         "не установлены. Платежи через YooKassa не будут работать."
+    )
+# Предупреждаем, если переменные Coze API не заданы
+if not COZE_API_TOKEN or not COZE_WORKFLOW_ID or not COZE_SPACE_ID:
+    logging.warning(
+        "Переменные окружения COZE_API_TOKEN, COZE_WORKFLOW_ID или COZE_SPACE_ID "
+        "не установлены. Автоматический поиск источников не будет работать."
     )
 
 client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
@@ -121,9 +134,25 @@ def get_chat_id(context: CallbackContext, update: Update = None) -> int:
         raise ValueError("Не удалось определить chat_id")
 
 def validate_generated_content(content: str, chapter: str) -> str:
-    """Валидирует и очищает сгенерированный контент от нежелательных фраз"""
+    """Валидирует и очищает сгенерированный контент от нежелательных фраз и смайликов"""
     if not content or len(content.strip()) < 100:
         raise ValueError(f"Слишком короткий контент для главы {chapter}")
+    
+    # Удаляем все смайлики и эмодзи из текста
+    # Используем регулярное выражение для удаления Unicode смайликов
+    emoji_pattern = re.compile(
+        "["
+        u"\U0001F600-\U0001F64F"  # эмоции
+        u"\U0001F300-\U0001F5FF"  # символы и пиктограммы
+        u"\U0001F680-\U0001F6FF"  # транспорт и символы на карте
+        u"\U0001F1E0-\U0001F1FF"  # флаги
+        u"\U00002702-\U000027B0"
+        u"\U000024C2-\U0001F251"
+        u"\U0001F900-\U0001F9FF"  # дополнительные смайлики
+        u"\U0001FA70-\U0001FAFF"  # расширенные символы
+        "]+", flags=re.UNICODE
+    )
+    content = emoji_pattern.sub('', content)
     
     # Удаляем нежелательные фразы в начале текста
     unwanted_patterns = [
@@ -151,6 +180,224 @@ def validate_generated_content(content: str, chapter: str) -> str:
         return content.strip()  # Возвращаем оригинал
     
     return content_cleaned
+
+# ===================== ФУНКЦИИ ДЛЯ РАБОТЫ С ИСТОЧНИКАМИ =====================
+
+async def fetch_sources_from_coze(keywords: str, count: int = 15) -> list:
+    """
+    Получает источники через Coze workflow API
+    
+    Args:
+        keywords: Ключевые слова для поиска источников
+        count: Количество источников для поиска (не используется, т.к. workflow возвращает фиксированное количество)
+    
+    Returns:
+        Список словарей с ключами 'title' и 'url'
+    """
+    logging.info(f"Запрос источников через Coze workflow по ключевым словам: {keywords}")
+    
+    headers = {
+        "Authorization": f"Bearer {COZE_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    # ВАЖНО: Простой запрос (только ключевые слова) даёт максимум источников (~10)
+    # Сложные инструкции с указанием количества уменьшают результат до 3 источников
+    payload = {
+        "workflow_id": COZE_WORKFLOW_ID,
+        "parameters": {
+            "input": keywords  # Простой запрос без дополнительных инструкций
+        }
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(COZE_API_URL, headers=headers, json=payload, timeout=60) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    logging.info(f"Ответ от Coze API: {data}")
+                    
+                    # Извлекаем источники из ответа
+                    sources = parse_coze_response(data)
+                    logging.info(f"Получено источников: {len(sources)}")
+                    return sources
+                else:
+                    error_text = await response.text()
+                    logging.error(f"Ошибка при запросе к Coze API: {response.status}, {error_text}")
+                    return []
+    except asyncio.TimeoutError:
+        logging.error("Таймаут при запросе к Coze API")
+        return []
+    except Exception as e:
+        logging.error(f"Исключение при запросе к Coze API: {e}")
+        return []
+
+def parse_coze_response(data: dict) -> list:
+    """
+    Парсит ответ от Coze workflow и извлекает источники
+    
+    Args:
+        data: JSON ответ от Coze API
+    
+    Returns:
+        Список словарей с ключами 'title' и 'url'
+    """
+    sources = []
+    
+    try:
+        # Извлекаем данные из ответа
+        if "data" in data:
+            data_str = data.get("data", "{}")
+            
+            # Если data - это строка, парсим как JSON
+            if isinstance(data_str, str):
+                try:
+                    data_obj = json.loads(data_str)
+                except json.JSONDecodeError:
+                    logging.error("Не удалось распарсить JSON из data")
+                    return []
+            else:
+                data_obj = data_str
+            
+            # Извлекаем массив output
+            if "output" in data_obj:
+                output_array = data_obj.get("output", [])
+                
+                if isinstance(output_array, list):
+                    for item in output_array:
+                        if isinstance(item, dict):
+                            # Извлекаем title и link
+                            title = item.get("title", "")
+                            link = item.get("link", "")
+                            
+                            if title and link:
+                                sources.append({"title": title, "url": link})
+                        elif isinstance(item, str):
+                            # Если элемент - строка, парсим её
+                            parsed = parse_source_string(item)
+                            if parsed:
+                                sources.append(parsed)
+        
+        logging.info(f"Распарсено источников: {len(sources)}")
+    except Exception as e:
+        logging.error(f"Ошибка при парсинге ответа Coze: {e}")
+    
+    return sources
+
+def parse_sources_from_text(text: str) -> list:
+    """
+    Парсит источники из текстового ответа
+    
+    Args:
+        text: Текст с источниками
+    
+    Returns:
+        Список словарей с ключами 'title' и 'url'
+    """
+    sources = []
+    
+    # Ищем паттерны вида "Заголовок - URL" или "Заголовок: URL"
+    patterns = [
+        r'(.+?)\s*[-–—]\s*(https?://[^\s]+)',
+        r'(.+?):\s*(https?://[^\s]+)',
+        r'\d+\.\s*(.+?)\s*[-–—]\s*(https?://[^\s]+)',
+        r'\d+\.\s*(.+?):\s*(https?://[^\s]+)',
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.MULTILINE)
+        for match in matches:
+            title = match[0].strip()
+            url = match[1].strip()
+            sources.append({"title": title, "url": url})
+    
+    # Если ничего не нашли, попробуем найти просто URL
+    if not sources:
+        urls = re.findall(r'https?://[^\s]+', text)
+        for i, url in enumerate(urls, 1):
+            sources.append({"title": f"Источник {i}", "url": url})
+    
+    return sources
+
+def parse_source_string(text: str) -> dict:
+    """
+    Парсит одну строку с источником
+    
+    Args:
+        text: Строка с источником
+    
+    Returns:
+        Словарь с ключами 'title' и 'url' или None
+    """
+    patterns = [
+        r'(.+?)\s*[-–—]\s*(https?://[^\s]+)',
+        r'(.+?):\s*(https?://[^\s]+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.match(pattern, text.strip())
+        if match:
+            return {"title": match.group(1).strip(), "url": match.group(2).strip()}
+    
+    # Если это просто URL
+    if text.strip().startswith('http'):
+        return {"title": "Источник", "url": text.strip()}
+    
+    return None
+
+def format_source_gost(source: dict, index: int) -> str:
+    """
+    Оформляет источник по ГОСТу
+    
+    Args:
+        source: Словарь с ключами 'title' и 'url'
+        index: Номер источника в списке
+    
+    Returns:
+        Строка с оформленным источником
+    """
+    title = source.get("title", "Без названия")
+    url = source.get("url", "")
+    
+    # Базовое оформление по ГОСТ 7.0.5-2008
+    # Для электронных ресурсов
+    if url:
+        # Определяем тип источника по URL
+        if "doi.org" in url or "scholar.google" in url or "elibrary.ru" in url:
+            # Научная статья
+            formatted = f"{index}. {title} [Электронный ресурс]. – URL: {url} (дата обращения: {datetime.now().strftime('%d.%m.%Y')})."
+        elif "wikipedia.org" in url:
+            # Википедия
+            formatted = f"{index}. {title} // Википедия [Электронный ресурс]. – URL: {url} (дата обращения: {datetime.now().strftime('%d.%m.%Y')})."
+        else:
+            # Обычный веб-ресурс
+            formatted = f"{index}. {title} [Электронный ресурс]. – URL: {url} (дата обращения: {datetime.now().strftime('%d.%m.%Y')})."
+    else:
+        # Если URL отсутствует
+        formatted = f"{index}. {title}."
+    
+    return formatted
+
+def extract_keywords_from_theme(theme: str, science_name: str) -> str:
+    """
+    Извлекает ключевые слова из темы работы для поиска источников
+    
+    Args:
+        theme: Тема работы
+        science_name: Название предмета
+    
+    Returns:
+        Строка с ключевыми словами
+    """
+    # Объединяем тему и предмет для более точного поиска
+    keywords = f"{theme} {science_name}"
+    
+    # Убираем лишние слова
+    stop_words = ["по", "для", "в", "на", "с", "о", "и", "или", "а", "но"]
+    words = keywords.split()
+    filtered_words = [w for w in words if w.lower() not in stop_words]
+    
+    return " ".join(filtered_words)
 
 # Функции администрирования и безопасности
 def is_admin(user_id: int) -> bool:
@@ -1558,15 +1805,6 @@ async def preferences_handler(update: Update, context: CallbackContext) -> int:
 
 async def create_payment(update: Update, context: CallbackContext) -> int:
     try:
-        # Проверяем настройки YooKassa
-        if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
-            await update.callback_query.answer("❌ Платежная система временно недоступна")
-            await update.callback_query.edit_message_text(
-                "❌ Извините, платежная система временно недоступна. "
-                "Пожалуйста, попробуйте позже или обратитесь в поддержку."
-            )
-            return ConversationHandler.END
-        
         # Создаем заказ в базе данных
         user_id = update.callback_query.from_user.id
         order_data = {
@@ -1583,6 +1821,33 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
         price_map = {"Эссе": 300, "Доклад": 300, "Реферат": 400, "Проект": 400, "Курсовая работа": 500, "Дипломная работа": 800}
         price = price_map.get(work_type, 300)
         context.user_data["price"] = price
+        
+        # 🧪 ТЕСТОВЫЙ РЕЖИМ - пропускаем реальную оплату
+        if TESTING_MODE:
+            logging.info(f"🧪 ТЕСТОВЫЙ РЕЖИМ: Пропуск оплаты для заказа {order_id}")
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(
+                f"🧪 ТЕСТОВЫЙ РЕЖИМ\n\n"
+                f"Заказ #{order_id} принят!\n"
+                f"Тип работы: {work_type}\n"
+                f"Цена: {price}₽ (оплата не требуется)\n\n"
+                f"⏳ Начинаю генерацию работы...\n"
+                f"Это займет 5-15 минут."
+            )
+            # Обновляем статус как оплаченный
+            await update_order_status(order_id, "paid", payment_id="TEST_MODE")
+            # Запускаем процесс генерации
+            asyncio.create_task(process_order(context, user_id, order_id))
+            return ConversationHandler.END
+        
+        # Проверяем настройки YooKassa для реального режима
+        if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
+            await update.callback_query.answer("❌ Платежная система временно недоступна")
+            await update.callback_query.edit_message_text(
+                "❌ Извините, платежная система временно недоступна. "
+                "Пожалуйста, попробуйте позже или обратитесь в поддержку."
+            )
+            return ConversationHandler.END
         
         try:
             # Отладочное логирование перед созданием платежа
@@ -1664,6 +1929,63 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
         except:
             pass
         return ConversationHandler.END
+
+# Функция для обработки заказа в тестовом режиме
+async def process_order(context: CallbackContext, chat_id: int, order_id: int) -> None:
+    """Обработка заказа в тестовом режиме без реальной оплаты"""
+    try:
+        logging.info(f"🧪 ТЕСТОВЫЙ РЕЖИМ: Начало обработки заказа {order_id}")
+        
+        await context.bot.send_message(chat_id=chat_id, text="✅ Заказ принят! Начинаем выполнение вашего заказа.")
+        await context.bot.send_message(chat_id=chat_id, text="🔄 Генерация вашей работы... Пожалуйста, подождите!")
+        
+        # Генерация плана
+        plan_array = await generate_plan(context)
+        if not plan_array:
+            raise RuntimeError("План не сгенерирован")
+        context.user_data["plan_array"] = plan_array
+        
+        # Генерация текста
+        doc_io = await generate_text(plan_array, context)
+        if doc_io is None:
+            raise RuntimeError("Документ не создан")
+        
+        # Создаем безопасное имя файла
+        work_type = context.user_data.get("work_type", "Работа")
+        work_theme = context.user_data.get("work_theme", "Тема")
+        safe_type = sanitize_filename(work_type)
+        safe_theme = sanitize_filename(work_theme)
+        filename = f"{safe_type}_{safe_theme}.docx"
+        
+        # Отправляем документ
+        await context.bot.send_document(
+            chat_id=chat_id, 
+            document=doc_io, 
+            filename=filename,
+            caption="✅ Ваша работа готова! 🧪 ТЕСТОВЫЙ РЕЖИМ"
+        )
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text="🎉 Ваш заказ выполнен! 🧪 ТЕСТОВЫЙ РЕЖИМ\n\n"
+                 "Это тестовый заказ, оплата не производилась."
+        )
+        
+        # Обновляем статус заказа как выполненный
+        await update_order_status(order_id, "completed")
+        logging.info(f"🧪 ТЕСТОВЫЙ РЕЖИМ: Заказ {order_id} успешно завершён")
+        
+    except Exception as e:
+        logging.error(f"🧪 ТЕСТОВЫЙ РЕЖИМ: Ошибка при обработке заказа {order_id}: {e}")
+        
+        # Обновляем статус заказа как неудачный
+        await update_order_status(order_id, "failed")
+        
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text="❌ Произошла ошибка при генерации работы.\n"
+                 "🧪 ТЕСТОВЫЙ РЕЖИМ - оплата не производилась.\n\n"
+                 f"Ошибка: {str(e)}"
+        )
 
 # Функция для автоматического мониторинга статуса платежа и начала выполнения заказа
 async def monitor_payment(context: CallbackContext, chat_id: int, payment_id: str) -> None:
@@ -1987,11 +2309,27 @@ async def generate_plan(context: CallbackContext) -> list:
     return plan_array
 
 # Функция для добавления нумерации страниц
-def add_page_number(section):
+def add_page_number(section, start_number=1):
+    """Добавляет нумерацию страниц в раздел документа
+    
+    Args:
+        section: Раздел документа
+        start_number: Начальный номер страницы (по умолчанию 1)
+    """
     footer = section.footer
     footer_paragraph = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
     footer_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = footer_paragraph.add_run()
+    
+    # Устанавливаем начальный номер страницы для раздела
+    if start_number > 1:
+        sectPr = section._sectPr
+        pgNumType = sectPr.find(qn('w:pgNumType'))
+        if pgNumType is None:
+            pgNumType = OxmlElement('w:pgNumType')
+            sectPr.insert(0, pgNumType)
+        pgNumType.set(qn('w:start'), str(start_number))
+    
     fldChar1 = OxmlElement('w:fldChar')
     fldChar1.set(qn('w:fldCharType'), 'begin')
     run._r.append(fldChar1)
@@ -2005,6 +2343,22 @@ def add_page_number(section):
 # Функция для добавления титульного листа
 def add_title_page(doc, work_type, work_theme, science_name, page_number):
     """Добавляет титульный лист в документ"""
+    
+    # Очищаем тему от смайликов
+    import re
+    emoji_pattern = re.compile(
+        "["
+        u"\U0001F600-\U0001F64F"
+        u"\U0001F300-\U0001F5FF"
+        u"\U0001F680-\U0001F6FF"
+        u"\U0001F1E0-\U0001F1FF"
+        u"\U00002702-\U000027B0"
+        u"\U000024C2-\U0001F251"
+        u"\U0001F900-\U0001F9FF"
+        u"\U0001FA70-\U0001FAFF"
+        "]+", flags=re.UNICODE
+    )
+    work_theme = emoji_pattern.sub('', work_theme).strip()
     
     # Название учебного заведения
     university_p = doc.add_paragraph()
@@ -2210,12 +2564,14 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
 
     # Создание документа в памяти
     doc = docx.Document()
-    section = doc.sections[0]
+    
+    # === ТИТУЛЬНЫЙ ЛИСТ (без нумерации) ===
+    title_section = doc.sections[0]
     # Настройка полей по требованиям: верх/низ 25мм, лево 30мм, право 10мм
-    section.top_margin = Cm(2.5)     # 25 мм
-    section.bottom_margin = Cm(2.5)  # 25 мм
-    section.left_margin = Cm(3.0)    # 30 мм
-    section.right_margin = Cm(1.0)   # 10 мм
+    title_section.top_margin = Cm(2.5)     # 25 мм
+    title_section.bottom_margin = Cm(2.5)  # 25 мм
+    title_section.left_margin = Cm(3.0)    # 30 мм
+    title_section.right_margin = Cm(1.0)   # 10 мм
 
     # Установка стиля текста для всего документа
     style = doc.styles['Normal']
@@ -2228,17 +2584,22 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
     paragraph_format.line_spacing = 1.5  # Интервал 1.5
     paragraph_format.first_line_indent = Cm(1.25)  # Отступ первой строки
 
-    # Добавление нумерации страниц
-    add_page_number(section)
-
-    # === ТИТУЛЬНЫЙ ЛИСТ ===
-    # Добавляем титульный лист
+    # Добавляем титульный лист (без нумерации)
     add_title_page(doc, work_type, work_theme, science_name, context.user_data.get("page_number", 0))
     
-    # Добавляем разрыв страницы после титульного листа
-    doc.add_page_break()
+    # Добавляем разрыв раздела после титульного листа
+    doc.add_section()
     
-    # === ОГЛАВЛЕНИЕ ===
+    # === ОГЛАВЛЕНИЕ (начинается нумерация с 2) ===
+    content_section = doc.sections[-1]
+    content_section.top_margin = Cm(2.5)
+    content_section.bottom_margin = Cm(2.5)
+    content_section.left_margin = Cm(3.0)
+    content_section.right_margin = Cm(1.0)
+    
+    # Добавляем нумерацию страниц со 2-й страницы
+    add_page_number(content_section, start_number=2)
+    
     # Добавляем заголовок "Оглавление"
     contents_heading = doc.add_heading("ОГЛАВЛЕНИЕ", level=1)
     contents_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -2246,56 +2607,147 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
         run.font.name = 'Times New Roman'
         run.font.size = Pt(16)
         run.font.bold = True
+        run.font.color.rgb = RGBColor(0, 0, 0)  # Черный цвет
     
     # Добавляем пункты оглавления
+    page_counter = 3  # Первая страница после оглавления
+    
+    # Главы основной части
     for i, chapter in enumerate(plan_array, 1):
         contents_p = doc.add_paragraph()
         contents_p.paragraph_format.first_line_indent = Cm(0)
         contents_p.paragraph_format.left_indent = Cm(0)
         
         # Добавляем номер и название главы
-        run = contents_p.add_run(f"{i}. {chapter}")
+        chapter_text = f"{i}. {chapter}"
+        run = contents_p.add_run(chapter_text)
         run.font.name = 'Times New Roman'
         run.font.size = Pt(14)
         
-        # Добавляем точки-заполнители и номер страницы
-        dots_run = contents_p.add_run("." * (50 - len(f"{i}. {chapter}")))
+        # Добавляем точки-заполнители
+        dots_count = max(1, 70 - len(chapter_text))
+        dots_run = contents_p.add_run("." * dots_count)
         dots_run.font.name = 'Times New Roman'
         dots_run.font.size = Pt(14)
         
-        page_run = contents_p.add_run(f"{i + 2}")  # +2 потому что титульный лист и оглавление
+        # Номер страницы
+        page_run = contents_p.add_run(f" {page_counter}")
         page_run.font.name = 'Times New Roman'
         page_run.font.size = Pt(14)
+        page_counter += 1
+    
+    # Список источников
+    contents_p = doc.add_paragraph()
+    contents_p.paragraph_format.first_line_indent = Cm(0)
+    contents_p.paragraph_format.left_indent = Cm(0)
+    run = contents_p.add_run("Список источников")
+    run.font.name = 'Times New Roman'
+    run.font.size = Pt(14)
+    dots_run = contents_p.add_run("." * 57)
+    dots_run.font.name = 'Times New Roman'
+    dots_run.font.size = Pt(14)
+    page_run = contents_p.add_run(f" {page_counter}")
+    page_run.font.name = 'Times New Roman'
+    page_run.font.size = Pt(14)
     
     # Добавляем разрыв страницы после оглавления
     doc.add_page_break()
 
-    # === ОСНОВНОЕ СОДЕРЖАНИЕ ===
-    # Добавление основного заголовка работы
-    main_heading = doc.add_heading(f"{work_type} по теме: {work_theme}", level=1)
-    main_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    # Настройка шрифта заголовка
-    for run in main_heading.runs:
-        run.font.name = 'Times New Roman'
-        run.font.size = Pt(16)
-        run.font.bold = True
-
+    # === ОСНОВНАЯ ЧАСТЬ ===
     # Добавление текста глав в документ
-    for chapter, chapter_text in chapters_text:
-        chapter_heading = doc.add_heading(chapter, level=2)
+    for i, (chapter, chapter_text) in enumerate(chapters_text, 1):
+        chapter_heading = doc.add_heading(f"{i}. {chapter}", level=2)
         chapter_heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
         # Настройка шрифта заголовка главы
         for run in chapter_heading.runs:
             run.font.name = 'Times New Roman'
             run.font.size = Pt(14)
+            run.font.bold = True
+            run.font.color.rgb = RGBColor(0, 0, 0)  # Черный цвет
         
         p = doc.add_paragraph(chapter_text)
         p.paragraph_format.line_spacing = 1.5
         p.paragraph_format.first_line_indent = Cm(1.25)
+        p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY  # Выравнивание по ширине
         # Убеждаемся, что текст использует правильный шрифт
         for run in p.runs:
             run.font.name = 'Times New Roman'
             run.font.size = Pt(14)
+        
+        # Добавляем разрыв страницы после каждой главы (кроме последней)
+        if i < len(chapters_text):
+            doc.add_page_break()
+    
+    # === СПИСОК ИСТОЧНИКОВ ===
+    
+    # Определяем количество источников в зависимости от типа работы
+    if work_type in ["Курсовая работа", "Дипломная работа"]:
+        sources_count = 20
+    else:
+        sources_count = 12  # 10-15 источников, берем среднее значение
+    
+    # Получаем ключевые слова для поиска источников
+    keywords = extract_keywords_from_theme(work_theme, science_name)
+    
+    # Уведомляем пользователя о начале поиска источников
+    try:
+        chat_id = get_chat_id(context)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"📚 Ищу {sources_count} источников по теме работы..."
+        )
+    except Exception as chat_error:
+        logging.error(f"Ошибка отправки уведомления о поиске источников: {chat_error}")
+    
+    # Получаем источники через Coze workflow
+    sources = await fetch_sources_from_coze(keywords, sources_count)
+    
+    # Если источники получены, добавляем их в документ
+    if sources:
+        # Заголовок раздела
+        sources_heading = doc.add_heading("СПИСОК ИСТОЧНИКОВ", level=1)
+        sources_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in sources_heading.runs:
+            run.font.name = 'Times New Roman'
+            run.font.size = Pt(16)
+            run.font.bold = True
+            run.font.color.rgb = RGBColor(0, 0, 0)  # Черный цвет
+        
+        # Добавляем каждый источник
+        for i, source in enumerate(sources, 1):
+            formatted_source = format_source_gost(source, i)
+            source_p = doc.add_paragraph(formatted_source)
+            source_p.paragraph_format.line_spacing = 1.5
+            source_p.paragraph_format.first_line_indent = Cm(0)  # Без отступа для списка
+            source_p.paragraph_format.left_indent = Cm(0)
+            
+            # Настройка шрифта
+            for run in source_p.runs:
+                run.font.name = 'Times New Roman'
+                run.font.size = Pt(14)
+        
+        logging.info(f"Добавлено {len(sources)} источников в документ")
+        
+        # Уведомляем пользователя о завершении
+        try:
+            chat_id = get_chat_id(context)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Найдено и добавлено {len(sources)} источников"
+            )
+        except Exception as chat_error:
+            logging.error(f"Ошибка отправки уведомления о завершении поиска: {chat_error}")
+    else:
+        logging.warning("Не удалось получить источники через Coze workflow")
+        # Уведомляем пользователя
+        try:
+            chat_id = get_chat_id(context)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Не удалось автоматически найти источники. Пожалуйста, добавьте их самостоятельно."
+            )
+        except Exception as chat_error:
+            logging.error(f"Ошибка отправки уведомления об ошибке поиска: {chat_error}")
 
     # Сохранение документа в память
     doc_io = io.BytesIO()
@@ -2360,7 +2812,12 @@ def main():
     application.add_handler(CommandHandler("admin_export", admin_export))
     application.add_handler(CommandHandler("admin_monitor", admin_monitor))
 
-    logging.info("🚀 Бот запущен с улучшенной админ-панелью!")
+    # Вывод информации о режиме работы
+    mode_indicator = "🧪 ТЕСТОВЫЙ РЕЖИМ (без реальных платежей)" if TESTING_MODE else "💳 РАБОЧИЙ РЕЖИМ (с реальными платежами)"
+    logging.info(f"🚀 Бот запущен с улучшенной админ-панелью!")
+    logging.info(f"{'='*60}")
+    logging.info(f"{mode_indicator}")
+    logging.info(f"{'='*60}")
     application.run_polling()
 
 if __name__ == "__main__":
