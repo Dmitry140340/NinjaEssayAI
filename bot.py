@@ -48,7 +48,7 @@ COZE_SPACE_ID = os.getenv("COZE_SPACE_ID")
 COZE_API_URL = os.getenv("COZE_API_URL", "https://api.coze.com/v1/workflow/run")
 
 # 🧪 ТЕСТОВЫЙ РЕЖИМ - установите в False для рабочего режима с реальными платежами
-TESTING_MODE = False
+TESTING_MODE = True
 
 # Администраторы бота
 ADMIN_IDS = [659874549]  # Ваш Telegram ID как администратор
