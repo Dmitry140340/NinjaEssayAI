@@ -1882,7 +1882,7 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
             
             payment = Payment.create({
                 "amount": {"value": f"{price}.00", "currency": "RUB"},
-                "confirmation": {"type": "redirect", "return_url": "https://t.me/your_bot"},
+                "confirmation": {"type": "redirect", "return_url": "https://t.me/NinjaEssayAI_bot"},
                 "capture": True,
                 "description": f"{work_type} - {context.user_data.get('work_theme', 'Тема не указана')}",
                 "metadata": {"order_id": str(order_id)},
