@@ -2280,17 +2280,22 @@ async def generate_plan(context: CallbackContext) -> list:
             logging.error(f"Ошибка отправки сообщения: {chat_error}")
         return []
 
-    calls_number = max(1, page_number // 2)  # Минимум 1 пункт
+    # Минимум 3 пункта (Введение + 1 глава + Заключение), максимум зависит от страниц
+    calls_number = max(3, page_number)  # Для 3 страниц = 3 пункта, для 10 страниц = 10 пунктов
 
     prompt = (
         f"Действуй как специалист в области {science_name}. "
-        f"Составь план из {calls_number} пунктов для {work_type} "
+        f"Составь подробный план из {calls_number} пунктов для {work_type} "
         f"по теме: {work_theme}. Учти предпочтения: {preferences}. "
-        "ОБЯЗАТЕЛЬНО включи в план 'Введение' в начале и 'Заключение' в конце. "
-        "Верни план в виде нумерованного списка "
-        "(например, 1. Введение\n2. Раздел 1\n3. Раздел 2\n4. Заключение). "
-        "НЕ используй вводные фразы типа 'Отлично', 'Вот план', 'Составленный с учетом'. "
-        "Начинай сразу с пункта 1."
+        "ОБЯЗАТЕЛЬНО включи в план:\n"
+        "1. 'Введение' (первый пункт)\n"
+        f"2-{calls_number-1}. Основные разделы (содержательные названия глав)\n"
+        f"{calls_number}. 'Заключение' (последний пункт)\n\n"
+        "Верни ТОЛЬКО нумерованный список без дополнительных комментариев:\n"
+        "1. Введение\n"
+        "2. [Название раздела 1]\n"
+        "3. [Название раздела 2]\n"
+        f"{calls_number}. Заключение"
     )
 
     try:
@@ -2325,12 +2330,35 @@ async def generate_plan(context: CallbackContext) -> list:
         logging.info("Ответ не в формате JSON, обрабатываем как текст.")
         lines = response_content.splitlines()
         plan_array = [line.strip() for line in lines if line.strip()]
-        plan_array = [re.sub(r'^\d+\.\s*', '', item) for item in plan_array]
+        # Удаляем нумерацию и очищаем
+        plan_array = [re.sub(r'^\d+\.\s*', '', item).strip() for item in plan_array if item.strip()]
+        # Фильтруем пустые строки и мусор
+        plan_array = [item for item in plan_array if item and len(item) > 2]
 
-    if len(plan_array) > calls_number:
+    # Проверяем и дополняем план
+    if len(plan_array) < calls_number:
+        # Если план слишком короткий, дополняем
+        needed = calls_number - len(plan_array)
+        for i in range(needed):
+            plan_array.insert(len(plan_array), f"Раздел {len(plan_array)}")
+    elif len(plan_array) > calls_number:
+        # Если план слишком длинный, обрезаем
         plan_array = plan_array[:calls_number]
-    elif len(plan_array) < calls_number:
-        plan_array.extend([f"Раздел {i+1}" for i in range(len(plan_array), calls_number)])
+    
+    # Гарантируем наличие Введения и Заключения
+    if plan_array and not any(keyword in plan_array[0].lower() for keyword in ['введение', 'introduction']):
+        plan_array[0] = 'Введение'
+    
+    if plan_array and not any(keyword in plan_array[-1].lower() for keyword in ['заключение', 'conclusion', 'выводы']):
+        plan_array[-1] = 'Заключение'
+    
+    # Если план пустой или слишком короткий, создаем минимальный план
+    if not plan_array or len(plan_array) < 3:
+        logging.warning("План от DeepSeek некорректен, создаем базовый план")
+        plan_array = ['Введение']
+        for i in range(calls_number - 2):
+            plan_array.append(f'Глава {i+1}')
+        plan_array.append('Заключение')
 
     logging.info(f"Итоговый план: {plan_array}")
     return plan_array
