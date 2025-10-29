@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# NinjaEssayAI Bot - Automated Essay Writing Service
+
 import os
 import asyncio
 import io
@@ -8,6 +12,13 @@ import sys
 import logging
 import aiohttp
 from collections import defaultdict
+
+# Настройка кодировки для Windows консоли
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+
 try:
     import psutil
 except ImportError:
@@ -83,8 +94,18 @@ if not COZE_API_TOKEN or not COZE_WORKFLOW_ID or not COZE_SPACE_ID:
 
 client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Настройка логирования с правильной кодировкой для Windows
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+# Явно устанавливаем кодировку для логов
+for handler in logging.root.handlers:
+    if isinstance(handler, logging.StreamHandler):
+        handler.stream = sys.stdout
 
 # Функции валидации и безопасности
 def sanitize_filename(text: str) -> str:
@@ -1455,15 +1476,6 @@ GENERATION_SEMAPHORE = asyncio.Semaphore(10)
 async def order(update: Update, context: CallbackContext) -> int:
     user_id = update.effective_user.id
     
-    # Проверяем rate limiting
-    if not check_rate_limit(user_id):
-        await update.message.reply_text(
-            "⏳ **Превышен лимит запросов!**\n\n"
-            f"Вы можете создавать не более {MAX_REQUESTS_PER_HOUR} заказов в час.\n"
-            "Пожалуйста, попробуйте позже."
-        )
-        return ConversationHandler.END
-    
     await log_user_action(user_id, "order_command")
     # Updated keyboard to include prices for each work type
     keyboard = create_keyboard_with_back([
@@ -1483,6 +1495,9 @@ async def back_button_handler(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     await query.answer()
     
+    # Получаем chat_id для отправки сообщений
+    chat_id = query.message.chat_id
+    
     # Возвращаемся к этапу предпочтений
     use_custom_plan = context.user_data.get("use_custom_plan", False)
     plan_entered = context.user_data.get("plan_entered", False)
@@ -1499,34 +1514,37 @@ async def back_button_handler(update: Update, context: CallbackContext) -> int:
     
     if use_custom_plan and plan_entered:
         # Если был пользовательский план, возвращаемся к вводу предпочтений
-        keyboard = create_keyboard_with_back([], show_back=True)
+        keyboard = create_keyboard_with_back([["⏭️ Пропустить"]], show_back=True)
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-        await query.message.reply_text(
-            "📝 Шаг 6/6: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="📝 Шаг 6/6: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):",
             reply_markup=reply_markup
         )
     elif use_custom_plan and not plan_entered:
         # Возвращаемся к вводу плана
         keyboard = create_keyboard_with_back([], show_back=True)
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-        await query.message.reply_text(
-            "📝 Шаг 5/6: Введите план вашей работы.\n\n"
-            "Каждый пункт плана с новой строки, например:\n"
-            "1. Введение\n"
-            "2. Основная часть\n"
-            "3. Заключение\n\n"
-            "Или просто:\n"
-            "Введение\n"
-            "Основная часть\n"
-            "Заключение",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="📝 Шаг 5/6: Введите план вашей работы.\n\n"
+                "Каждый пункт плана с новой строки, например:\n"
+                "1. Введение\n"
+                "2. Основная часть\n"
+                "3. Заключение\n\n"
+                "Или просто:\n"
+                "Введение\n"
+                "Основная часть\n"
+                "Заключение",
             reply_markup=reply_markup
         )
     else:
         # Был автоматический план, возвращаемся к предпочтениям
-        keyboard = create_keyboard_with_back([], show_back=True)
+        keyboard = create_keyboard_with_back([["⏭️ Пропустить"]], show_back=True)
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-        await query.message.reply_text(
-            "📝 Шаг 5/6: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="📝 Шаг 5/6: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):",
             reply_markup=reply_markup
         )
     
@@ -1624,7 +1642,7 @@ async def work_theme_handler(update: Update, context: CallbackContext) -> int:
         return await go_back_handler(update, context)
     
     try:
-        work_theme = validate_user_input(update.message.text, 200)
+        work_theme = validate_user_input(update.message.text, 400)
         context.user_data["work_theme"] = work_theme
     except ValueError as e:
         await update.message.reply_text(f"⚠️ Ошибка: {e}")
@@ -1653,7 +1671,7 @@ async def custom_plan_handler(update: Update, context: CallbackContext) -> int:
     if choice == "🤖 Автоматический план":
         # Автоматический план - переходим к предпочтениям
         context.user_data["use_custom_plan"] = False
-        keyboard = create_keyboard_with_back([], show_back=True)
+        keyboard = create_keyboard_with_back([["⏭️ Пропустить"]], show_back=True)
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
         await update.message.reply_text(
             "📝 Шаг 5/6: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):",
@@ -1733,7 +1751,7 @@ async def preferences_handler(update: Update, context: CallbackContext) -> int:
             
             # Показываем введенный план пользователю
             plan_preview = "\n".join([f"{i+1}. {item}" for i, item in enumerate(cleaned_plan)])
-            keyboard = create_keyboard_with_back([], show_back=True)
+            keyboard = create_keyboard_with_back([["⏭️ Пропустить"]], show_back=True)
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
             await update.message.reply_text(
                 f"✅ План принят:\n\n{plan_preview}{warning_text}\n\n📝 Шаг 6/6: Опишите ваши предпочтения по работе (например, стиль, источники, сроки):",
@@ -1746,27 +1764,36 @@ async def preferences_handler(update: Update, context: CallbackContext) -> int:
             return PREFERENCES
     else:
         # Обрабатываем предпочтения (для автоматического плана или финальный шаг для пользовательского)
-        try:
-            preferences = validate_user_input(update.message.text, 500)
-            context.user_data["preferences"] = preferences
-        except ValueError as e:
-            await update.message.reply_text(f"⚠️ Ошибка: {e}")
-            return PREFERENCES
+        
+        # Проверяем, нажал ли пользователь "Пропустить"
+        if update.message.text == "⏭️ Пропустить":
+            context.user_data["preferences"] = "Без особых предпочтений"
+        else:
+            try:
+                preferences = validate_user_input(update.message.text, 500)
+                context.user_data["preferences"] = preferences
+            except ValueError as e:
+                await update.message.reply_text(f"⚠️ Ошибка: {e}")
+                return PREFERENCES
         
         # Переходим к оплате
         work_type = context.user_data["work_type"]
-        price = context.user_data.get("price")
-        if price is None:
-            if work_type in ["📝 Эссе","📜 Доклад"]:
-                price = 300
-            elif work_type in ["📖 Реферат","💼 Проект"]:
-                price = 400
-            elif work_type == "📚 Курсовая работа":
-                price = 500
-            elif work_type == "🎓 Дипломная работа":
-                price = 800
-            else:
-                price = 300
+        
+        # Извлекаем чистое название типа работы без эмодзи и цены
+        clean_type = re.sub(r"[^А-Яа-яЁё ]", "", work_type).strip()
+        
+        # Определяем цену на основе чистого названия (всегда пересчитываем для надежности)
+        if clean_type in ["Эссе", "Доклад"]:
+            price = 300
+        elif clean_type in ["Реферат", "Проект"]:
+            price = 400
+        elif clean_type == "Курсовая работа":
+            price = 500
+        elif clean_type == "Дипломная работа":
+            price = 800
+        else:
+            price = 300
+        context.user_data["price"] = price
         
         context.user_data["current_step"] = PAYMENT
         
@@ -1817,10 +1844,9 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
         order_id = await create_order(user_id, order_data)
         context.user_data["order_id"] = order_id
         
-        work_type = context.user_data["work_type"]
-        price_map = {"Эссе": 300, "Доклад": 300, "Реферат": 400, "Проект": 400, "Курсовая работа": 500, "Дипломная работа": 800}
-        price = price_map.get(work_type, 300)
-        context.user_data["price"] = price
+        # Получаем данные из context
+        price = context.user_data.get("price", 300)
+        work_type = context.user_data.get("work_type", "Работа")
         
         # 🧪 ТЕСТОВЫЙ РЕЖИМ - пропускаем реальную оплату
         if TESTING_MODE:
@@ -2260,8 +2286,9 @@ async def generate_plan(context: CallbackContext) -> list:
         f"Действуй как специалист в области {science_name}. "
         f"Составь план из {calls_number} пунктов для {work_type} "
         f"по теме: {work_theme}. Учти предпочтения: {preferences}. "
+        "ОБЯЗАТЕЛЬНО включи в план 'Введение' в начале и 'Заключение' в конце. "
         "Верни план в виде нумерованного списка "
-        "(например, 1. Раздел 1\n2. Раздел 2). "
+        "(например, 1. Введение\n2. Раздел 1\n3. Раздел 2\n4. Заключение). "
         "НЕ используй вводные фразы типа 'Отлично', 'Вот план', 'Составленный с учетом'. "
         "Начинай сразу с пункта 1."
     )
@@ -2665,14 +2692,21 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
             run.font.bold = True
             run.font.color.rgb = RGBColor(0, 0, 0)  # Черный цвет
         
-        p = doc.add_paragraph(chapter_text)
-        p.paragraph_format.line_spacing = 1.5
-        p.paragraph_format.first_line_indent = Cm(1.25)
-        p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY  # Выравнивание по ширине
-        # Убеждаемся, что текст использует правильный шрифт
-        for run in p.runs:
-            run.font.name = 'Times New Roman'
-            run.font.size = Pt(14)
+        # Разбиваем текст на блоки по двойным переносам строк
+        text_blocks = [block.strip() for block in chapter_text.split('\n\n') if block.strip()]
+        
+        # Добавляем каждый блок как отдельный параграф
+        for block in text_blocks:
+            p = doc.add_paragraph(block)
+            p.paragraph_format.line_spacing = 1.5
+            p.paragraph_format.first_line_indent = Cm(1.25)
+            p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY  # Выравнивание по ширине
+            p.paragraph_format.space_after = Pt(0)  # Убираем отступ после параграфа
+            p.paragraph_format.space_before = Pt(0)  # Убираем отступ перед параграфом
+            # Убеждаемся, что текст использует правильный шрифт
+            for run in p.runs:
+                run.font.name = 'Times New Roman'
+                run.font.size = Pt(14)
         
         # Добавляем разрыв страницы после каждой главы (кроме последней)
         if i < len(chapters_text):
@@ -2688,16 +2722,6 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
     
     # Получаем ключевые слова для поиска источников
     keywords = extract_keywords_from_theme(work_theme, science_name)
-    
-    # Уведомляем пользователя о начале поиска источников
-    try:
-        chat_id = get_chat_id(context)
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"📚 Ищу {sources_count} источников по теме работы..."
-        )
-    except Exception as chat_error:
-        logging.error(f"Ошибка отправки уведомления о поиске источников: {chat_error}")
     
     # Получаем источники через Coze workflow
     sources = await fetch_sources_from_coze(keywords, sources_count)
@@ -2792,7 +2816,8 @@ def main():
                 CommandHandler("cancel", cancel)
             ]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
     )
 
     # Основные команды
@@ -2813,8 +2838,12 @@ def main():
     application.add_handler(CommandHandler("admin_monitor", admin_monitor))
 
     # Вывод информации о режиме работы
-    mode_indicator = "🧪 ТЕСТОВЫЙ РЕЖИМ (без реальных платежей)" if TESTING_MODE else "💳 РАБОЧИЙ РЕЖИМ (с реальными платежами)"
-    logging.info(f"🚀 Бот запущен с улучшенной админ-панелью!")
+    mode_indicator = "ТЕСТОВЫЙ РЕЖИМ (без реальных платежей)" if TESTING_MODE else "РАБОЧИЙ РЕЖИМ (с реальными платежами)"
+    print("="*60)
+    print(f"🚀 Бот запущен с улучшенной админ-панелью!")
+    print(f"{'🧪' if TESTING_MODE else '💳'} {mode_indicator}")
+    print("="*60)
+    logging.info("Бот запущен с улучшенной админ-панелью")
     logging.info(f"{'='*60}")
     logging.info(f"{mode_indicator}")
     logging.info(f"{'='*60}")
