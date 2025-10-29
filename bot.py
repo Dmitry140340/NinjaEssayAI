@@ -2280,8 +2280,9 @@ async def generate_plan(context: CallbackContext) -> list:
             logging.error(f"Ошибка отправки сообщения: {chat_error}")
         return []
 
-    # Минимум 3 пункта (Введение + 1 глава + Заключение), максимум зависит от страниц
-    calls_number = max(3, page_number)  # Для 3 страниц = 3 пункта, для 10 страниц = 10 пунктов
+    # Минимум 3 пункта (Введение + 1 глава + Заключение)
+    # Расчет: страницы / 2, но не менее 3
+    calls_number = max(3, page_number // 2)
 
     prompt = (
         f"Действуй как специалист в области {science_name}. "
