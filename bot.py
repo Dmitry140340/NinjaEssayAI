@@ -202,6 +202,46 @@ def validate_generated_content(content: str, chapter: str) -> str:
     
     return content_cleaned
 
+def remove_chapter_title_from_text(chapter_text: str, chapter_title: str) -> str:
+    """Удаляет дублирующийся заголовок главы из начала текста
+    
+    Args:
+        chapter_text: Текст главы, возможно содержащий заголовок
+        chapter_title: Название главы для поиска и удаления
+    
+    Returns:
+        Текст без дублирующегося заголовка
+    """
+    if not chapter_text or not chapter_title:
+        return chapter_text
+    
+    # Очищаем название главы от номеров и лишних символов для поиска
+    clean_title = re.sub(r'^\d+\.\s*', '', chapter_title).strip()
+    clean_title = re.sub(r'^Глава\s+\d+[\.:]\s*', '', clean_title, flags=re.IGNORECASE).strip()
+    
+    # Паттерны для поиска заголовка в начале текста
+    patterns = [
+        # С номером главы в начале: "1. Введение", "Глава 1. Введение", "Глава 1: Введение"
+        rf'^Глава\s+\d+[\.:]\s*{re.escape(clean_title)}\.?\s*\n*',
+        rf'^\d+\.\s*{re.escape(clean_title)}\.?\s*\n*',
+        # Без номера: "Введение", "ВВЕДЕНИЕ"
+        rf'^{re.escape(clean_title)}\.?\s*\n*',
+        rf'^{re.escape(clean_title.upper())}\.?\s*\n*',
+        # С дополнительными символами
+        rf'^#+\s*{re.escape(clean_title)}\.?\s*\n*',
+        rf'^\*\*{re.escape(clean_title)}\*\*\.?\s*\n*',
+    ]
+    
+    # Пробуем удалить заголовок по каждому паттерну
+    result = chapter_text.strip()
+    for pattern in patterns:
+        result = re.sub(pattern, '', result, count=1, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Удаляем лишние переносы строк в начале
+    result = result.lstrip('\n').strip()
+    
+    return result
+
 # ===================== ФУНКЦИИ ДЛЯ РАБОТЫ С ИСТОЧНИКАМИ =====================
 
 async def fetch_sources_from_coze(keywords: str, count: int = 15) -> list:
@@ -2715,6 +2755,9 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
     # === ОСНОВНАЯ ЧАСТЬ ===
     # Добавление текста глав в документ
     for i, (chapter, chapter_text) in enumerate(chapters_text, 1):
+        # Удаляем дублирующийся заголовок из текста главы
+        chapter_text_cleaned = remove_chapter_title_from_text(chapter_text, chapter)
+        
         chapter_heading = doc.add_heading(f"{i}. {chapter}", level=2)
         chapter_heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
         # Настройка шрифта заголовка главы
@@ -2725,7 +2768,7 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
             run.font.color.rgb = RGBColor(0, 0, 0)  # Черный цвет
         
         # Разбиваем текст на блоки по двойным переносам строк
-        text_blocks = [block.strip() for block in chapter_text.split('\n\n') if block.strip()]
+        text_blocks = [block.strip() for block in chapter_text_cleaned.split('\n\n') if block.strip()]
         
         # Добавляем каждый блок как отдельный параграф
         for block in text_blocks:
