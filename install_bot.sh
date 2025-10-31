@@ -61,7 +61,7 @@ pip install -r requirements.txt
 echo "⚙️  Создание .env файла..."
 cat > .env << 'EOF'
 TELEGRAM_BOT_TOKEN=7860525094:AAETNSM92hnralH0x4QwhnzK4TvLbBELiSQ
-DEEPSEEK_API_KEY=sk-d0905959a24144c7b6063a7c9b2b4b6c
+DEEPSEEK_API_KEY=sk-2fcca2e6cf50493ba7d67eb50e73516f
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 YOOKASSA_SHOP_ID=467003
 YOOKASSA_SECRET_KEY=live_MzkzYWM5ZmYtZDMzOS00OGY2LTk1Y2EtMjMzYzIyMGE3YmNi
