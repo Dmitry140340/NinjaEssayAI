@@ -2628,6 +2628,9 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
     title_section.bottom_margin = Cm(2.5)  # 25 мм
     title_section.left_margin = Cm(3.0)    # 30 мм
     title_section.right_margin = Cm(1.0)   # 10 мм
+    
+    # Отключаем нумерацию на титульном листе
+    title_section.different_first_page_header_footer = True
 
     # Установка стиля текста для всего документа
     style = doc.styles['Normal']
