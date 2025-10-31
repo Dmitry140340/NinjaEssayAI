@@ -154,26 +154,37 @@ def get_chat_id(context: CallbackContext, update: Update = None) -> int:
     else:
         raise ValueError("Не удалось определить chat_id")
 
-def validate_generated_content(content: str, chapter: str) -> str:
-    """Валидирует и очищает сгенерированный контент от нежелательных фраз и смайликов"""
-    if not content or len(content.strip()) < 100:
-        raise ValueError(f"Слишком короткий контент для главы {chapter}")
+def remove_emojis(text: str) -> str:
+    """Удаляет все эмодзи и смайлики из текста"""
+    if not text:
+        return text
     
-    # Удаляем все смайлики и эмодзи из текста
-    # Используем регулярное выражение для удаления Unicode смайликов
+    # Расширенный паттерн для удаления всех эмодзи
     emoji_pattern = re.compile(
         "["
         u"\U0001F600-\U0001F64F"  # эмоции
         u"\U0001F300-\U0001F5FF"  # символы и пиктограммы
         u"\U0001F680-\U0001F6FF"  # транспорт и символы на карте
         u"\U0001F1E0-\U0001F1FF"  # флаги
-        u"\U00002702-\U000027B0"
-        u"\U000024C2-\U0001F251"
+        u"\U00002702-\U000027B0"  # разное
+        u"\U000024C2-\U0001F251"  # заключенные символы
         u"\U0001F900-\U0001F9FF"  # дополнительные смайлики
         u"\U0001FA70-\U0001FAFF"  # расширенные символы
+        u"\U00002500-\U00002BEF"  # китайские символы
+        u"\U0001F018-\U0001F270"  # разные символы
+        u"\U00002300-\U000023FF"  # технические символы
+        u"\U0001F004-\U0001F0CF"  # игровые символы
         "]+", flags=re.UNICODE
     )
-    content = emoji_pattern.sub('', content)
+    return emoji_pattern.sub('', text)
+
+def validate_generated_content(content: str, chapter: str) -> str:
+    """Валидирует и очищает сгенерированный контент от нежелательных фраз и смайликов"""
+    if not content or len(content.strip()) < 100:
+        raise ValueError(f"Слишком короткий контент для главы {chapter}")
+    
+    # Удаляем все смайлики и эмодзи из текста
+    content = remove_emojis(content)
     
     # Удаляем нежелательные фразы в начале текста
     unwanted_patterns = [
@@ -2386,6 +2397,9 @@ async def generate_plan(context: CallbackContext) -> list:
         # Если план слишком длинный, обрезаем
         plan_array = plan_array[:calls_number]
     
+    # Удаляем эмодзи из всех элементов плана
+    plan_array = [remove_emojis(item) for item in plan_array]
+    
     # Гарантируем наличие Введения и Заключения
     if plan_array and not any(keyword in plan_array[0].lower() for keyword in ['введение', 'introduction']):
         plan_array[0] = 'Введение'
@@ -2593,7 +2607,17 @@ async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
     # Рассчитываем количество слов на главу на основе заявленного количества страниц
     # Примерно 250-300 слов на страницу, распределяем равномерно между главами
     total_words = page_number * 275  # Среднее количество слов на страницу
-    words_per_chapter = max(400, total_words // len(plan_array))  # Минимум 400 слов на главу
+    words_per_chapter = total_words // len(plan_array)  # Распределяем слова между главами
+    
+    # Для очень маленьких работ (1-2 страницы) минимум 200 слов на главу
+    # Для средних работ (3-5 страниц) минимум 300 слов
+    # Для больших работ (6+ страниц) минимум 400 слов
+    if page_number <= 2:
+        words_per_chapter = max(200, words_per_chapter)
+    elif page_number <= 5:
+        words_per_chapter = max(300, words_per_chapter)
+    else:
+        words_per_chapter = max(400, words_per_chapter)
     
     logging.info(f"Запрошено страниц: {page_number}, глав в плане: {len(plan_array)}, слов на главу: {words_per_chapter}")
 
