@@ -1304,6 +1304,7 @@ async def update_order_status(order_id: int, status: str, payment_id: str = None
 # Команда /start
 async def start(update: Update, context: CallbackContext) -> None:
     user_id = update.effective_user.id
+    username = update.effective_user.username or ""
     await log_user_action(user_id, "start_command")
     # Show user agreement before displaying menu
     keyboard = [["Продолжить"]]
@@ -1311,7 +1312,8 @@ async def start(update: Update, context: CallbackContext) -> None:
     
     # Уведомление о тестовом режиме
     mode_text = ""
-    if TESTING_MODE:
+    is_test_user = username in TEST_MODE_USERNAMES
+    if TESTING_MODE or is_test_user:
         mode_text = "\n🧪 *ВНИМАНИЕ: БОТ В ТЕСТОВОМ РЕЖИМЕ* 🧪\n" \
                    "Все заказы выполняются БЕСПЛАТНО для тестирования!\n\n"
     
