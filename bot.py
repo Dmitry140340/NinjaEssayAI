@@ -1852,36 +1852,19 @@ async def preferences_handler(update: Update, context: CallbackContext) -> int:
         
         context.user_data["current_step"] = PAYMENT
         
-        # Проверяем режим работы
-        if TESTING_MODE:
-            # Тестовый режим - бесплатное создание заказа
-            keyboard = [
-                [InlineKeyboardButton("🧪 ТЕСТОВЫЙ ЗАКАЗ (БЕСПЛАТНО)", callback_data="test_order")],
-                [InlineKeyboardButton("◀️ Назад", callback_data="back")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(
-                f"🧪 *ТЕСТОВЫЙ РЕЖИМ* 🧪\n\n"
-                f"Обычная стоимость: {price} рублей\n"
-                f"В тестовом режиме - БЕСПЛАТНО!\n\n"
-                "Нажмите кнопку ниже для создания тестового заказа:",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-        else:
-            # Создание реального платежа через YooKassa
-            keyboard = [
-                [InlineKeyboardButton("💳 Оплатить заказ", callback_data="pay")],
-                [InlineKeyboardButton("◀️ Назад", callback_data="back")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(
-                f"💰 *Оплата заказа* 💰\n\n"
-                f"Сумма к оплате: {price} рублей\n\n"
-                "Нажмите кнопку ниже для перехода к оплате:",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
+        # Создание платежа через YooKassa (или тестовый заказ)
+        keyboard = [
+            [InlineKeyboardButton("💳 Оплатить заказ", callback_data="pay")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"💰 *Оплата заказа* 💰\n\n"
+            f"Сумма к оплате: {price} рублей\n\n"
+            "Нажмите кнопку ниже для перехода к оплате:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
         return PAYMENT
 
 
@@ -3073,7 +3056,6 @@ def main():
             PREFERENCES: [MessageHandler(filters.TEXT & ~filters.COMMAND, preferences_handler)],
             PAYMENT: [
                 CallbackQueryHandler(create_payment, pattern="^pay$"),
-                CallbackQueryHandler(create_test_order, pattern="^test_order$"),
                 CallbackQueryHandler(back_button_handler, pattern="^back$"),
                 CommandHandler("cancel", cancel)
             ]
