@@ -64,6 +64,10 @@ TESTING_MODE = False
 # Администраторы бота
 ADMIN_IDS = [659874549]  # Ваш Telegram ID как администратор
 
+# Пользователи с постоянным тестовым режимом (по username)
+# Для этих пользователей оплата всегда бесплатная
+TEST_MODE_USERNAMES = ["AbuHavva"]  # Username без @
+
 # Система ограничения запросов (rate limiting)
 user_request_times = defaultdict(list)
 MAX_REQUESTS_PER_HOUR = 5
@@ -1885,6 +1889,8 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
     try:
         # Создаем заказ в базе данных
         user_id = update.callback_query.from_user.id
+        username = update.callback_query.from_user.username or ""
+        
         order_data = {
             "work_type": context.user_data.get("work_type", ""),
             "science_name": context.user_data.get("science_name", ""),
@@ -1899,9 +1905,13 @@ async def create_payment(update: Update, context: CallbackContext) -> int:
         price = context.user_data.get("price", 300)
         work_type = context.user_data.get("work_type", "Работа")
         
+        # Проверяем, является ли пользователь тестовым
+        is_test_user = username in TEST_MODE_USERNAMES
+        
         # 🧪 ТЕСТОВЫЙ РЕЖИМ - пропускаем реальную оплату
-        if TESTING_MODE:
-            logging.info(f"🧪 ТЕСТОВЫЙ РЕЖИМ: Пропуск оплаты для заказа {order_id}")
+        if TESTING_MODE or is_test_user:
+            mode_reason = "тестовый пользователь @" + username if is_test_user else "глобальный тестовый режим"
+            logging.info(f"🧪 ТЕСТОВЫЙ РЕЖИМ ({mode_reason}): Пропуск оплаты для заказа {order_id}")
             await update.callback_query.answer()
             await update.callback_query.edit_message_text(
                 f"🧪 ТЕСТОВЫЙ РЕЖИМ\n\n"
