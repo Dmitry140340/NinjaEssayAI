@@ -43,6 +43,19 @@ from datetime import datetime, timezone, timedelta
 import uuid
 from yookassa import Configuration, Payment, Refund
 
+# Импорты для презентаций
+from pptx import Presentation
+from pptx.util import Inches, Pt as PptxPt
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.dml.color import RGBColor as PptxRGBColor
+from pptx.chart.data import CategoryChartData
+from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+from PIL import Image
+import requests
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # Для работы без GUI
+
 # Загрузка переменных окружения
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -2033,6 +2046,35 @@ async def process_order(context: CallbackContext, chat_id: int, order_id: int) -
             filename=filename,
             caption="✅ Ваша работа готова!"
         )
+        
+        # Проверяем, является ли работа докладом - генерируем презентацию
+        work_type_clean = re.sub(r"[^А-Яа-яЁё ]", "", work_type).strip()
+        if "Доклад" in work_type_clean:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="🎨 Создаем презентацию PowerPoint... Это займет 1-2 минуты."
+                )
+                
+                # Генерация презентации
+                pptx_io = await generate_presentation(plan_array, context)
+                pptx_filename = f"{safe_type}_{safe_theme}.pptx"
+                
+                # Отправляем презентацию
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=pptx_io,
+                    filename=pptx_filename,
+                    caption="🎨 Презентация готова! Профессиональный дизайн с изображениями и графиками."
+                )
+                logging.info(f"✅ Презентация для заказа {order_id} создана")
+            except Exception as pptx_error:
+                logging.error(f"Ошибка создания презентации: {pptx_error}")
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ Презентация не создана из-за технической ошибки. Документ Word готов."
+                )
+        
         await context.bot.send_message(
             chat_id=chat_id, 
             text="🎉 Ваш заказ выполнен! Спасибо за использование нашего сервиса!"
@@ -2095,6 +2137,35 @@ async def monitor_payment(context: CallbackContext, chat_id: int, payment_id: st
                         filename=filename,
                         caption="✅ Ваша работа готова! Спасибо за использование NinjaEssayAI!"
                     )
+                    
+                    # Проверяем, является ли работа докладом - генерируем презентацию
+                    work_type_clean = re.sub(r"[^А-Яа-яЁё ]", "", work_type).strip()
+                    if "Доклад" in work_type_clean:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text="🎨 Создаем презентацию PowerPoint... Это займет 1-2 минуты."
+                            )
+                            
+                            # Генерация презентации
+                            pptx_io = await generate_presentation(plan_array, context)
+                            pptx_filename = f"{safe_type}_{safe_theme}.pptx"
+                            
+                            # Отправляем презентацию
+                            await context.bot.send_document(
+                                chat_id=chat_id,
+                                document=pptx_io,
+                                filename=pptx_filename,
+                                caption="🎨 Презентация готова! Профессиональный дизайн с изображениями и графиками."
+                            )
+                            logging.info(f"✅ Презентация для заказа {order_id} создана")
+                        except Exception as pptx_error:
+                            logging.error(f"Ошибка создания презентации: {pptx_error}")
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text="⚠️ Презентация не создана из-за технической ошибки. Документ Word готов."
+                            )
+                    
                     await context.bot.send_message(chat_id=chat_id, text="🎉 Ваш заказ выполнен! Спасибо за использование нашего сервиса!")
                     
                     # Обновляем статус заказа как выполненный
@@ -2707,6 +2778,344 @@ def parse_preferences_by_chapter(preferences: str, plan_array: list) -> dict:
     return result
 
 
+# ===================== ФУНКЦИИ ДЛЯ ГЕНЕРАЦИИ ПРЕЗЕНТАЦИЙ =====================
+
+async def download_image_from_url(url: str) -> io.BytesIO:
+    """Скачивает изображение по URL и возвращает его в памяти"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    image_data = await response.read()
+                    return io.BytesIO(image_data)
+    except Exception as e:
+        logging.error(f"Ошибка загрузки изображения {url}: {e}")
+    return None
+
+async def search_image_for_topic(topic: str) -> str:
+    """Генерирует URL изображения с Unsplash API для темы"""
+    # Используем Unsplash Source API для получения случайного изображения по теме
+    # Это бесплатный сервис, не требующий API ключа
+    query = topic.replace(' ', '+')
+    url = f"https://source.unsplash.com/800x600/?{query}"
+    return url
+
+def create_chart_image(data: dict, chart_type: str = 'bar') -> io.BytesIO:
+    """Создает изображение графика с помощью matplotlib"""
+    try:
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        if chart_type == 'bar':
+            ax.bar(data.keys(), data.values(), color='#4472C4')
+        elif chart_type == 'line':
+            ax.plot(list(data.keys()), list(data.values()), marker='o', color='#4472C4')
+        elif chart_type == 'pie':
+            ax.pie(data.values(), labels=data.keys(), autopct='%1.1f%%', startangle=90)
+        
+        ax.set_title('Визуализация данных', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        
+        # Сохраняем в память
+        img_buffer = io.BytesIO()
+        plt.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight')
+        img_buffer.seek(0)
+        plt.close(fig)
+        
+        return img_buffer
+    except Exception as e:
+        logging.error(f"Ошибка создания графика: {e}")
+        return None
+
+async def extract_presentation_content(text_content: str, chapter_title: str) -> dict:
+    """Извлекает ключевые пункты из текста для презентации с помощью DeepSeek"""
+    try:
+        prompt = f"""Из следующего текста выдели 3-5 ключевых пунктов для слайда презентации.
+        
+Текст главы "{chapter_title}":
+{text_content[:1500]}
+
+Верни ТОЛЬКО JSON в формате:
+{{
+    "title": "Заголовок слайда",
+    "bullets": ["Пункт 1", "Пункт 2", "Пункт 3"],
+    "chart_data": {{"Категория1": 30, "Категория2": 45, "Категория3": 25}}
+}}
+
+Если данных для графика нет, используй chart_data: null."""
+
+        response = await client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=500
+        )
+        
+        content = response.choices[0].message.content.strip()
+        # Убираем markdown форматирование если есть
+        if content.startswith('```'):
+            content = content.split('\n', 1)[1]
+            content = content.rsplit('```', 1)[0]
+        
+        return json.loads(content)
+    except Exception as e:
+        logging.error(f"Ошибка извлечения контента: {e}")
+        return {
+            "title": chapter_title,
+            "bullets": ["Основные моменты главы", "Ключевые выводы", "Важные аспекты"],
+            "chart_data": None
+        }
+
+def apply_modern_theme(prs: Presentation):
+    """Применяет современный дизайн к презентации"""
+    # Устанавливаем размер слайда (16:9)
+    prs.slide_width = Inches(10)
+    prs.slide_height = Inches(5.625)
+
+def add_title_slide(prs: Presentation, title: str, subtitle: str, author: str = "NinjaEssayAI"):
+    """Добавляет титульный слайд"""
+    slide_layout = prs.slide_layouts[0]  # Title Slide layout
+    slide = prs.slides.add_slide(slide_layout)
+    
+    # Заголовок
+    title_shape = slide.shapes.title
+    title_shape.text = title
+    title_shape.text_frame.paragraphs[0].font.size = PptxPt(44)
+    title_shape.text_frame.paragraphs[0].font.bold = True
+    title_shape.text_frame.paragraphs[0].font.color.rgb = PptxRGBColor(0, 0, 0)
+    
+    # Подзаголовок
+    subtitle_shape = slide.placeholders[1]
+    subtitle_shape.text = f"{subtitle}\n\n{author}"
+    subtitle_shape.text_frame.paragraphs[0].font.size = PptxPt(24)
+    
+    return slide
+
+def add_content_slide(prs: Presentation, title: str, bullets: list, image_stream: io.BytesIO = None):
+    """Добавляет слайд с контентом и изображением"""
+    # Используем layout с заголовком и содержимым
+    slide_layout = prs.slide_layouts[1]  # Title and Content
+    slide = prs.slides.add_slide(slide_layout)
+    
+    # Заголовок
+    title_shape = slide.shapes.title
+    title_shape.text = title
+    title_shape.text_frame.paragraphs[0].font.size = PptxPt(32)
+    title_shape.text_frame.paragraphs[0].font.bold = True
+    title_shape.text_frame.paragraphs[0].font.color.rgb = PptxRGBColor(68, 114, 196)
+    
+    # Если есть изображение, используем layout с двумя колонками
+    if image_stream:
+        # Текст слева
+        left = Inches(0.5)
+        top = Inches(1.5)
+        width = Inches(4.5)
+        height = Inches(3.5)
+        
+        text_box = slide.shapes.add_textbox(left, top, width, height)
+        text_frame = text_box.text_frame
+        text_frame.word_wrap = True
+        
+        for bullet_text in bullets:
+            p = text_frame.add_paragraph()
+            p.text = bullet_text
+            p.level = 0
+            p.font.size = PptxPt(16)
+            p.space_before = PptxPt(12)
+        
+        # Изображение справа
+        image_stream.seek(0)
+        left = Inches(5.5)
+        top = Inches(1.5)
+        slide.shapes.add_picture(image_stream, left, top, width=Inches(4), height=Inches(3.5))
+    else:
+        # Только текст
+        content_shape = slide.placeholders[1]
+        text_frame = content_shape.text_frame
+        text_frame.clear()
+        
+        for bullet_text in bullets:
+            p = text_frame.add_paragraph()
+            p.text = bullet_text
+            p.level = 0
+            p.font.size = PptxPt(18)
+            p.space_before = PptxPt(12)
+    
+    return slide
+
+def add_chart_slide(prs: Presentation, title: str, chart_data: dict):
+    """Добавляет слайд с графиком"""
+    slide_layout = prs.slide_layouts[5]  # Blank layout
+    slide = prs.slides.add_slide(slide_layout)
+    
+    # Заголовок
+    left = Inches(0.5)
+    top = Inches(0.3)
+    width = Inches(9)
+    height = Inches(0.8)
+    title_box = slide.shapes.add_textbox(left, top, width, height)
+    title_frame = title_box.text_frame
+    p = title_frame.paragraphs[0]
+    p.text = title
+    p.font.size = PptxPt(32)
+    p.font.bold = True
+    p.font.color.rgb = PptxRGBColor(68, 114, 196)
+    
+    # График
+    chart_img = create_chart_image(chart_data, 'bar')
+    if chart_img:
+        left = Inches(1.5)
+        top = Inches(1.5)
+        slide.shapes.add_picture(chart_img, left, top, width=Inches(7), height=Inches(3.5))
+    
+    return slide
+
+def add_conclusion_slide(prs: Presentation, title: str = "Спасибо за внимание!"):
+    """Добавляет финальный слайд"""
+    slide_layout = prs.slide_layouts[6]  # Blank layout
+    slide = prs.slides.add_slide(slide_layout)
+    
+    # Центральный текст
+    left = Inches(2)
+    top = Inches(2)
+    width = Inches(6)
+    height = Inches(1.5)
+    
+    text_box = slide.shapes.add_textbox(left, top, width, height)
+    text_frame = text_box.text_frame
+    text_frame.text = title
+    
+    p = text_frame.paragraphs[0]
+    p.font.size = PptxPt(48)
+    p.font.bold = True
+    p.font.color.rgb = PptxRGBColor(68, 114, 196)
+    p.alignment = PP_ALIGN.CENTER
+    
+    # Подпись
+    left = Inches(3)
+    top = Inches(4)
+    width = Inches(4)
+    height = Inches(0.5)
+    
+    footer_box = slide.shapes.add_textbox(left, top, width, height)
+    footer_frame = footer_box.text_frame
+    footer_frame.text = "Создано с помощью NinjaEssayAI"
+    
+    p = footer_frame.paragraphs[0]
+    p.font.size = PptxPt(14)
+    p.font.color.rgb = PptxRGBColor(100, 100, 100)
+    p.alignment = PP_ALIGN.CENTER
+    
+    return slide
+
+async def generate_presentation(plan_array: list, context: CallbackContext) -> io.BytesIO:
+    """Генерирует презентацию PowerPoint на основе плана работы"""
+    try:
+        logging.info("🎨 Начало генерации презентации")
+        
+        # Создаем презентацию
+        prs = Presentation()
+        apply_modern_theme(prs)
+        
+        # Получаем данные из контекста
+        work_type = context.user_data.get("work_type", "Презентация")
+        work_theme = context.user_data.get("work_theme", "Тема работы")
+        science_name = context.user_data.get("science_name", "Дисциплина")
+        
+        # Титульный слайд
+        add_title_slide(prs, work_theme, f"{work_type} по дисциплине: {science_name}")
+        
+        # Генерируем текст для каждой главы и создаем слайды
+        for i, chapter_title in enumerate(plan_array):
+            logging.info(f"📊 Создание слайда для главы: {chapter_title}")
+            
+            # Генерируем текст главы (упрощенная версия)
+            chapter_text = await generate_chapter_text(chapter_title, context, i, len(plan_array))
+            
+            # Извлекаем ключевые пункты для слайда
+            slide_content = await extract_presentation_content(chapter_text, chapter_title)
+            
+            # Пытаемся найти изображение для темы
+            image_stream = None
+            try:
+                image_url = await search_image_for_topic(chapter_title)
+                image_stream = await download_image_from_url(image_url)
+            except Exception as e:
+                logging.warning(f"Не удалось загрузить изображение: {e}")
+            
+            # Добавляем слайд с контентом
+            add_content_slide(
+                prs,
+                slide_content['title'],
+                slide_content['bullets'],
+                image_stream
+            )
+            
+            # Если есть данные для графика, добавляем слайд с графиком
+            if slide_content.get('chart_data'):
+                add_chart_slide(
+                    prs,
+                    f"{slide_content['title']} - Визуализация",
+                    slide_content['chart_data']
+                )
+        
+        # Заключительный слайд
+        add_conclusion_slide(prs)
+        
+        # Сохраняем в память
+        pptx_io = io.BytesIO()
+        prs.save(pptx_io)
+        pptx_io.seek(0)
+        
+        logging.info("✅ Презентация успешно создана")
+        return pptx_io
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка генерации презентации: {e}")
+        raise
+
+async def generate_chapter_text(chapter_title: str, context: CallbackContext, chapter_index: int, total_chapters: int) -> str:
+    """Генерирует текст для главы (упрощенная версия для презентации)"""
+    try:
+        science_name = context.user_data.get("science_name", "")
+        work_theme = context.user_data.get("work_theme", "")
+        preferences = context.user_data.get("preferences", "")
+        
+        # Определяем тип главы
+        if chapter_index == 0 or "введение" in chapter_title.lower():
+            chapter_type = "введение"
+        elif chapter_index == total_chapters - 1 or "заключение" in chapter_title.lower():
+            chapter_type = "заключение"
+        else:
+            chapter_type = "основная часть"
+        
+        prompt = f"""Напиши краткий текст (200-300 слов) для главы "{chapter_title}" 
+по теме "{work_theme}" в области {science_name}.
+
+Тип главы: {chapter_type}
+Предпочтения: {preferences}
+
+Сделай текст информативным и структурированным."""
+        
+        async with GENERATION_SEMAPHORE:
+            response = await client.chat.completions.create(
+                model="deepseek-reasoner",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=500
+            )
+        
+        content = response.choices[0].message.content
+        # Извлекаем текст из reasoning_content если есть
+        if hasattr(response.choices[0].message, 'reasoning_content'):
+            content = response.choices[0].message.reasoning_content or content
+        
+        return content.strip()
+        
+    except Exception as e:
+        logging.error(f"Ошибка генерации текста главы: {e}")
+        return f"Основное содержание главы {chapter_title}"
+
+
 # Генерация текста и создание документа (в памяти)
 async def generate_text(plan_array, context: CallbackContext) -> io.BytesIO:
     logging.info("Начало генерации текста по главам плана.")
@@ -3038,6 +3447,31 @@ async def cancel(update: Update, context: CallbackContext) -> int:
     )
     return ConversationHandler.END
 
+# Команда для заказа презентации
+async def order_presentation(update: Update, context: CallbackContext) -> int:
+    """Начинает процесс заказа презентации"""
+    user_id = update.effective_user.id
+    await log_user_action(user_id, "presentation_command")
+    
+    keyboard = [["/order"], ["/presentation"], ["/help", "/cancel"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        "📊 *Заказ презентации PowerPoint* 📊\n\n"
+        "Презентация будет создана автоматически на основе доклада.\n"
+        "Включает:\n"
+        "✅ Профессиональный дизайн\n"
+        "✅ Изображения по теме\n"
+        "✅ Графики и диаграммы\n"
+        "✅ Структурированный контент\n\n"
+        "💰 Стоимость: 400 рублей\n\n"
+        "Для заказа используйте команду /order и выберите тип работы 'Доклад'.\n"
+        "После генерации доклада вы получите также презентацию!",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+    return ConversationHandler.END
+
 # Основная функция
 def main():
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -3063,6 +3497,7 @@ def main():
 
     # Основные команды
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("presentation", order_presentation))
     application.add_handler(MessageHandler(filters.Regex("^Продолжить$"), continue_handler))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("menu", menu))
